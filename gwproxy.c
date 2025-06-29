@@ -65,18 +65,6 @@ static const struct option long_opts[] = {
 	{ NULL,			0,			NULL,	0 }
 };
 
-enum {
-	EV_BIT_ACCEPT	= (1ull << 48ull),
-	EV_BIT_EVENTFD	= (2ull << 48ull),
-	EV_BIT_TARGET	= (3ull << 48ull),
-	EV_BIT_CLIENT	= (4ull << 48ull),
-	EV_BIT_TIMER	= (5ull << 48ull),
-};
-
-#define EV_BIT_ALL	(0xffffull << 48ull)
-#define GET_EV_BIT(X)	((X) & EV_BIT_ALL)
-#define CLEAR_EV_BIT(X)	((X) & ~EV_BIT_ALL)
-
 struct gwp_cfg {
 	const char	*event_loop;
 	const char	*bind;
@@ -121,6 +109,27 @@ static const struct gwp_cfg default_opts = {
 
 struct gwp_ctx;
 
+enum {
+	EV_BIT_ACCEPT	= (1ull << 48ull),
+	EV_BIT_EVENTFD	= (2ull << 48ull),
+	EV_BIT_TARGET	= (3ull << 48ull),
+	EV_BIT_CLIENT	= (4ull << 48ull),
+	EV_BIT_TIMER	= (5ull << 48ull),
+};
+
+#define EV_BIT_ALL	(0xffffull << 48ull)
+#define GET_EV_BIT(X)	((X) & EV_BIT_ALL)
+#define CLEAR_EV_BIT(X)	((X) & ~EV_BIT_ALL)
+
+enum {
+	CONN_STATE_INIT			= 100,
+	CONN_STATE_SOCKS5_INIT		= 200,
+	CONN_STATE_SOCKS5_AUTH		= 201,
+	CONN_STATE_SOCKS5_CMD		= 202,
+	CONN_STATE_TARGET_CONNECTING	= 300,
+	CONN_STATE_FORWARDING		= 301,
+};
+
 struct gwp_conn {
 	int		fd;
 	uint32_t	len;
@@ -140,11 +149,12 @@ struct gwp_sockaddr {
 struct gwp_conn_pair {
 	struct gwp_conn		target;
 	struct gwp_conn		client;
+	bool			is_target_alive;
+	int			conn_state;
+	int			timer_fd;
+	uint32_t		idx;
 	struct gwp_sockaddr	client_addr;
 	struct gwp_sockaddr	target_addr;
-	uint32_t		idx;
-	int			timer_fd;
-	bool			is_target_alive;
 };
 
 struct gwp_conn_slot {
