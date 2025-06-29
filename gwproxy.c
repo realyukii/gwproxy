@@ -1522,13 +1522,13 @@ static int handle_ev_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	}
 
 	if (ev->events & EPOLLIN) {
-		r = do_splice(&gcp->client, &gcp->target, true, false);
+		r = do_splice(&gcp->client, &gcp->target, true, gcp->is_target_alive);
 		if (r)
 			return r;
 	}
 
 	if (ev->events & EPOLLOUT) {
-		r = do_splice(&gcp->target, &gcp->client, false, false);
+		r = do_splice(&gcp->target, &gcp->client, true, true);
 		if (r)
 			return r;
 	}
