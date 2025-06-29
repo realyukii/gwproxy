@@ -47,7 +47,7 @@ static const struct option long_opts[] = {
 	{ "event-loop",		required_argument,	NULL,	'e' },
 	{ "bind",		required_argument,	NULL,	'b' },
 	{ "target",		required_argument,	NULL,	't' },
-	{ "as-socks5",		no_argument,		NULL,	'S' },
+	{ "as-socks5",		required_argument,	NULL,	'S' },
 	{ "socks5-timeout",	required_argument,	NULL,	'o' },
 	{ "nr-workers",		required_argument,	NULL,	'w' },
 	{ "connect-timeout",	required_argument,	NULL,	'c' },
