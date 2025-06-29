@@ -1113,6 +1113,7 @@ static int create_sock_target(struct gwp_wrk *w, struct gwp_sockaddr *addr,
 			close(fd);
 			return -r;
 		}
+		*is_target_alive = false;
 	} else {
 		*is_target_alive = true;
 	}
