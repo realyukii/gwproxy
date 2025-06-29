@@ -1473,6 +1473,17 @@ static int handle_ev_target_conn_result(struct gwp_wrk *w,
 		gcp->target.fd, gcp->idx, ip_to_str(&gcp->client_addr),
 		ip_to_str(&gcp->target_addr));
 
+	if (gcp->timer_fd >= 0) {
+		r = epoll_ctl(w->ep_fd, EPOLL_CTL_DEL, gcp->timer_fd, NULL);
+		if (unlikely(r < 0)) {
+			r = -errno;
+			pr_err(ctx, "Failed to remove timer from epoll: %s", strerror(-r));
+			return r;
+		}
+		close(gcp->timer_fd);
+		gcp->timer_fd = -1;
+	}
+
 	gcp->is_target_alive = true;
 	if (gcp->client.len) {
 		r = do_splice(&gcp->client, &gcp->target, false, true);
@@ -1539,6 +1550,9 @@ static int handle_ev_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 static int handle_ev_timer(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct gwp_ctx *ctx = w->ctx;
+
+	if (gcp->timer_fd < 0)
+		return 0;
 
 	pr_warn(ctx, "Connection timeout! (idx=%u, cfd=%d, tfd=%d, ca=%s, ta=%s)",
 		gcp->idx, gcp->client.fd, gcp->target.fd,
