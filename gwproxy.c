@@ -2425,7 +2425,6 @@ static int handle_ev_client_socks5_init(struct gwp_wrk *w,
 	if (unlikely(len < exp_len))
 		return -EAGAIN;
 
-	gwp_conn_buf_advance(&gcp->client, exp_len);
 	/*
 	 * USERNAME/PASSWORD or NO AUTHENTICATION.
 	 */
@@ -2447,6 +2446,7 @@ static int handle_ev_client_socks5_init(struct gwp_wrk *w,
 	}
 
 	resp[1] = wanted_method; /* METHOD */
+	gwp_conn_buf_advance(&gcp->client, exp_len);
 	s = gwp_conn_buf_append(&gcp->target, resp, resp_len);
 	if (s)
 		return s;
@@ -2711,7 +2711,6 @@ static int handle_ev_client_socks5_cmd_connect(struct gwp_wrk *w,
 	if (unlikely(len < exp_len))
 		return -EAGAIN;
 
-	gwp_conn_buf_advance(c, exp_len);
 	memset(gs, 0, sizeof(*gs));
 	switch (atyp) {
 	case 0x01: /* IPv4 address */
@@ -2736,17 +2735,24 @@ static int handle_ev_client_socks5_cmd_connect(struct gwp_wrk *w,
 		port = ntohs(port);
 		snprintf(p, sizeof(p), "%hu", port);
 
-		if (w->ctx->gdns)
-			return exec_socks5_resolve_domain_async(w, h, p, gcp);
+		if (w->ctx->gdns) {
+			r = exec_socks5_resolve_domain_async(w, h, p, gcp);
+			if (r)
+				return r;
+		}
 
 		r = resolve_domain(h, p, gs);
-		if (r)
-			return exec_socks5_connect_reply(w, gcp, r);
+		if (r) {
+			r = exec_socks5_connect_reply(w, gcp, r);
+			if (r)
+				return r;
+		}
 
 		break;
 	}
 	}
 
+	gwp_conn_buf_advance(c, exp_len);
 	return exec_socks5_connect(w, gcp);
 }
 
