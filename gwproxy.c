@@ -35,6 +35,7 @@
 #include <netinet/tcp.h>
 #include <sys/timerfd.h>
 #include <sys/resource.h>
+#include <sys/inotify.h>
 
 #ifndef likely
 #define likely(x)	__builtin_expect(!!(x), 1)
@@ -60,6 +61,7 @@ static const struct option long_opts[] = {
 	{ "target",		required_argument,	NULL,	't' },
 	{ "as-socks5",		required_argument,	NULL,	'S' },
 	{ "socks5-timeout",	required_argument,	NULL,	'o' },
+	{ "socks5-auth-file",	required_argument,	NULL,	'A' },
 	{ "nr-workers",		required_argument,	NULL,	'w' },
 	{ "nr-dns-workers",	required_argument,	NULL,	'W' },
 	{ "connect-timeout",	required_argument,	NULL,	'c' },
@@ -83,6 +85,7 @@ struct gwp_cfg {
 	const char	*target;
 	bool		as_socks5;
 	int		socks5_timeout;
+	const char	*socks5_auth_file;
 	int		nr_workers;
 	int		nr_dns_workers;
 	int		connect_timeout;
@@ -105,6 +108,7 @@ static const struct gwp_cfg default_opts = {
 	.target			= NULL,
 	.as_socks5		= false,
 	.socks5_timeout		= 10,
+	.socks5_auth_file	= NULL,
 	.nr_workers		= 4,
 	.nr_dns_workers		= 4,
 	.connect_timeout	= 5,
@@ -131,6 +135,7 @@ enum {
 	EV_BIT_TIMER		= (5ull << 48ull),
 	EV_BIT_CLIENT_SOCKS5	= (6ull << 48ull),
 	EV_BIT_DNS_QUERY	= (7ull << 48ull),
+	EV_BIT_SOCKS5_AUTH_FILE	= (8ull << 48ull),
 };
 
 #define EV_BIT_ALL	(0xffffull << 48ull)
@@ -235,11 +240,26 @@ struct gwp_dns {
 	uint32_t		nr_queries;
 };
 
+struct gwp_socks5_user {
+	char	*u, *p;
+	uint8_t	ulen, plen;
+};
+
+struct gwp_socks5_auth {
+	FILE			*handle;
+	struct gwp_socks5_user	*users;
+	int			ino_fd;
+	size_t			nr;
+	size_t			cap;
+	pthread_rwlock_t	lock;
+};
+
 struct gwp_ctx {
 	volatile bool			stop;
 	FILE				*log_file;
 	struct gwp_wrk			*workers;
 	struct gwp_dns			*gdns;
+	struct gwp_socks5_auth		*s5auth;
 	struct gwp_sockaddr		target_addr;
 	struct gwp_cfg			cfg;
 	_Atomic(int32_t)		nr_fd_closed;
@@ -257,6 +277,7 @@ static void show_help(const char *app)
 	printf("  -t, --target=addr_port          Target address to connect to\n");
 	printf("  -S, --as-socks5=0|1             Run as a SOCKS5 proxy (default: %d)\n", default_opts.as_socks5);
 	printf("  -o, --socks5-timeout=sec        SOCKS5 auth timeout in seconds (default: %d)\n", default_opts.socks5_timeout);
+	printf("  -A, --socks5-auth-file=file     File containing username:password for SOCKS5 auth (default: no auth)\n");
 	printf("  -w, --nr-workers=nr             Number of worker threads (default: %d)\n", default_opts.nr_workers);
 	printf("  -W, --nr-dns-workers=nr         Number of DNS worker threads for SOCKS5 (default: %d)\n", default_opts.nr_dns_workers);
 	printf("  -c, --connect-timeout=sec       Connection to target timeout in seconds (default: %d)\n", default_opts.connect_timeout);
@@ -316,6 +337,9 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 			break;
 		case 'o':
 			cfg->socks5_timeout = atoi(optarg);
+			break;
+		case 'A':
+			cfg->socks5_auth_file = optarg;
 			break;
 		case 'w':
 			cfg->nr_workers = atoi(optarg);
@@ -683,6 +707,7 @@ static void gwp_ctx_free_thread_sock(struct gwp_wrk *w)
 static int gwp_ctx_init_thread_epoll(struct gwp_wrk *w)
 {
 	struct epoll_event ev, *events;
+	struct gwp_ctx *ctx = w->ctx;
 	int ep_fd, ev_fd, r;
 
 	ep_fd = epoll_create1(EPOLL_CLOEXEC);
@@ -716,15 +741,20 @@ static int gwp_ctx_init_thread_epoll(struct gwp_wrk *w)
 	memset(&ev, 0, sizeof(ev));
 	ev.events = EPOLLIN;
 	ev.data.u64 = EV_BIT_EVENTFD;
-	r = epoll_ctl(ep_fd, EPOLL_CTL_ADD, ev_fd, &ev);
-	if (r < 0)
+	if (epoll_ctl(ep_fd, EPOLL_CTL_ADD, ev_fd, &ev))
 		goto out_err_ctl;
 
 	ev.events = EPOLLIN;
 	ev.data.u64 = EV_BIT_ACCEPT;
-	r = epoll_ctl(ep_fd, EPOLL_CTL_ADD, w->tcp_fd, &ev);
-	if (r < 0)
+	if (epoll_ctl(ep_fd, EPOLL_CTL_ADD, w->tcp_fd, &ev))
 		goto out_err_ctl;
+
+	if (w->idx == 0 && ctx->s5auth) {
+		ev.events = EPOLLIN;
+		ev.data.u64 = EV_BIT_SOCKS5_AUTH_FILE;
+		if (epoll_ctl(ep_fd, EPOLL_CTL_ADD, ctx->s5auth->ino_fd, &ev))
+			goto out_err_ctl;
+	}
 
 	pr_dbg(w->ctx, "Worker %u epoll (ep_fd=%d, ev_fd=%d)", w->idx,
 		ep_fd, ev_fd);
@@ -732,7 +762,6 @@ static int gwp_ctx_init_thread_epoll(struct gwp_wrk *w)
 
 out_err_ctl:
 	r = -errno;
-	pr_err(w->ctx, "Failed to add eventfd to epoll: %s\n", strerror(-r));
 	free(events);
 	w->events = NULL;
 out_close_ev_fd:
@@ -1191,6 +1220,199 @@ static void gwp_ctx_free_dns(struct gwp_ctx *ctx)
 	pr_dbg(ctx, "DNS workers stopped and resources freed");
 }
 
+static int gwp_load_s5auth_add_user(struct gwp_socks5_auth *s5a,
+				    const char *line)
+{
+	char *u, *p;
+
+	if (s5a->nr >= s5a->cap) {
+		size_t new_cap = s5a->cap ? s5a->cap * 2 : 16;
+		struct gwp_socks5_user *new_users;
+		new_users = realloc(s5a->users, new_cap * sizeof(*new_users));
+		if (!new_users)
+			return -ENOMEM;
+		s5a->users = new_users;
+		s5a->cap = new_cap;
+	}
+
+	u = strdup(line);
+	if (!u)
+		return -ENOMEM;
+
+	p = strchr(u, ':');
+	if (p)
+		*p++ = '\0';
+
+	if (unlikely(strlen(u) > 255)) {
+		free(u);
+		return -EINVAL;
+	}
+
+	if (unlikely(p && strlen(p) > 255)) {
+		free(u);
+		return -EINVAL;
+	}
+
+	s5a->users[s5a->nr].u = u;
+	s5a->users[s5a->nr].p = p;
+	s5a->users[s5a->nr].ulen = strlen(u);
+	s5a->users[s5a->nr].plen = p ? strlen(p) : 0;
+	s5a->nr++;
+	return 0;
+}
+
+static void gwp_load_s5auth_free_users(struct gwp_socks5_auth *s5a)
+{
+	size_t i;
+
+	if (!s5a->users)
+		return;
+
+	for (i = 0; i < s5a->nr; i++)
+		free(s5a->users[i].u);
+
+	free(s5a->users);
+	s5a->users = NULL;
+	s5a->nr = 0;
+	s5a->cap = 0;
+}
+
+static bool is_space(unsigned char c)
+{
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static char *trim_str(char *str)
+{
+	char *end;
+
+	while (is_space((unsigned char)*str))
+		str++;
+
+	end = str + strlen(str) - 1;
+	while (end > str && is_space((unsigned char)*end))
+		end--;
+
+	end[1] = '\0';
+	return str;
+}
+
+static int gwp_load_s5auth(struct gwp_ctx *ctx)
+{
+	const char *s5a_file = ctx->cfg.socks5_auth_file;
+	struct gwp_socks5_auth *s5a = ctx->s5auth;
+	char buf[512], *t;
+	int r = 0;
+	size_t l;
+
+	pr_info(ctx, "Loading SOCKS5 authentication from '%s'", s5a_file);
+	pthread_rwlock_wrlock(&s5a->lock);
+	gwp_load_s5auth_free_users(s5a);
+	while (1) {
+		t = fgets(buf, sizeof(buf), s5a->handle);
+		if (!t)
+			break;
+
+		t = trim_str(t);
+		l = strlen(t);
+		if (!l)
+			continue;
+
+		r = gwp_load_s5auth_add_user(s5a, t);
+		if (r)
+			continue;
+	}
+	rewind(s5a->handle);
+	l = s5a->nr;
+	pthread_rwlock_unlock(&s5a->lock);
+	pr_info(ctx, "Loaded %zu users from '%s'", l, s5a_file);
+	return 0;
+}
+
+static int gwp_ctx_init_s5auth(struct gwp_ctx *ctx)
+{
+	const char *s5a_file = ctx->cfg.socks5_auth_file;
+	struct gwp_socks5_auth *s5a;
+	int r;
+
+	if (!ctx->cfg.as_socks5 || !s5a_file || !*s5a_file) {
+		ctx->s5auth = NULL;
+		return 0;
+	}
+
+	s5a = calloc(1, sizeof(*s5a));
+	if (!s5a)
+		return -ENOMEM;
+
+	r = pthread_rwlock_init(&s5a->lock, NULL);
+	if (r) {
+		r = -r;
+		pr_err(ctx, "Failed to initialize SOCKS5 auth lock: %s",
+			strerror(r));
+		goto out_free_s5a;
+	}
+
+	s5a->handle = fopen(s5a_file, "rb");
+	if (!s5a->handle) {
+		r = -errno;
+		pr_err(ctx, "Failed to open SOCKS5 auth file '%s': %s",
+			s5a_file, strerror(-r));
+		goto out_destroy_lock;
+	}
+
+	s5a->ino_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+	if (s5a->ino_fd < 0) {
+		r = -errno;
+		pr_err(ctx, "Failed to create inotify instance: %s",
+		       strerror(-r));
+		goto out_fclose_handle;
+	}
+
+	r = inotify_add_watch(s5a->ino_fd, s5a_file, IN_CLOSE_WRITE | IN_DELETE);
+	if (r < 0) {
+		r = -errno;
+		pr_err(ctx, "Failed to add inotify watch for '%s': %s",
+		       s5a_file, strerror(-r));
+		goto out_close_ino_fd;
+	}
+
+	ctx->s5auth = s5a;
+	r = gwp_load_s5auth(ctx);
+	if (r < 0) {
+		pr_err(ctx, "Failed to load SOCKS5 authentication: %s",
+		       strerror(-r));
+		goto out_close_ino_fd;
+	}
+
+	return 0;
+
+out_close_ino_fd:
+	close(s5a->ino_fd);
+out_fclose_handle:
+	fclose(s5a->handle);
+out_destroy_lock:
+	pthread_rwlock_destroy(&s5a->lock);
+out_free_s5a:
+	free(s5a);
+	ctx->s5auth = NULL;
+	return r;
+}
+
+static void gwp_ctx_free_s5auth(struct gwp_ctx *ctx)
+{
+	struct gwp_socks5_auth *s5a = ctx->s5auth;
+
+	if (!s5a)
+		return;
+
+	gwp_load_s5auth_free_users(s5a);
+	close(s5a->ino_fd);
+	fclose(s5a->handle);
+	pthread_rwlock_destroy(&s5a->lock);
+	free(s5a);
+	ctx->s5auth = NULL;
+}
+
 static int gwp_ctx_init(struct gwp_ctx *ctx)
 {
 	int r;
@@ -1198,11 +1420,17 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 	r = gwp_ctx_init_log(ctx);
 	if (r < 0)
 		return r;
+	r = gwp_ctx_init_s5auth(ctx);
+	if (r < 0) {
+		pr_err(ctx, "Failed to initialize SOCKS5 authentication: %s",
+			strerror(-r));
+		goto out_free_log;
+	}
 
 	r = gwp_ctx_init_dns(ctx);
 	if (r < 0) {
 		pr_err(ctx, "Failed to initialize DNS workers: %s", strerror(-r));
-		goto out_free_log;
+		goto out_free_s5auth;
 	}
 
 	if (!ctx->cfg.as_socks5) {
@@ -1210,7 +1438,7 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 		r = convert_str_to_ssaddr(t, &ctx->target_addr);
 		if (r) {
 			pr_err(ctx, "Invalid target address '%s'", t);
-			goto out_free_log;
+			goto out_free_dns;
 		}
 	}
 
@@ -1225,9 +1453,10 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 	}
 
 	return 0;
-
 out_free_dns:
 	gwp_ctx_free_dns(ctx);
+out_free_s5auth:
+	gwp_ctx_free_s5auth(ctx);
 out_free_log:
 	gwp_ctx_free_log(ctx);
 	return r;
@@ -1236,6 +1465,9 @@ out_free_log:
 static void gwp_ctx_signal_all_workers(struct gwp_ctx *ctx)
 {
 	int i;
+
+	if (!ctx->workers)
+		return;
 
 	for (i = 0; i < ctx->cfg.nr_workers; i++) {
 		struct gwp_wrk *w = &ctx->workers[i];
@@ -1254,6 +1486,7 @@ static void gwp_ctx_free(struct gwp_ctx *ctx)
 	gwp_ctx_stop(ctx);
 	gwp_ctx_free_threads(ctx);
 	gwp_ctx_free_dns(ctx);
+	gwp_ctx_free_s5auth(ctx);
 	gwp_ctx_free_log(ctx);
 }
 
@@ -2161,10 +2394,12 @@ static int exec_socks5_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
  *      Compliant implementations MUST support GSSAPI and SHOULD support
  *      USERNAME/PASSWORD authentication methods.
  */
-static int handle_ev_client_socks5_init(struct gwp_conn_pair *gcp)
+static int handle_ev_client_socks5_init(struct gwp_wrk *w,
+					struct gwp_conn_pair *gcp)
 {
 	uint8_t *buf = (uint8_t *)gcp->client.buf, nr_methods, wanted_method;
 	uint32_t len = gcp->client.len, exp_len, resp_len;
+	struct gwp_ctx *ctx = w->ctx;
 	uint8_t resp[2];
 	bool found;
 	int r, s;
@@ -2182,12 +2417,17 @@ static int handle_ev_client_socks5_init(struct gwp_conn_pair *gcp)
 		return -EAGAIN;
 
 	gwp_conn_buf_advance(&gcp->client, exp_len);
-	wanted_method = 0x00; /* NO AUTHENTICATION REQUIRED */
+	/*
+	 * USERNAME/PASSWORD or NO AUTHENTICATION.
+	 */
+	wanted_method = ctx->s5auth ? 0x02 : 0x00;
+
 	found = !!memchr(buf + 2, wanted_method, nr_methods);
 	resp_len = 2; /* VER + METHOD */
 	resp[0] = 0x05; /* VER */
 	if (found) {
-		gcp->conn_state = CONN_STATE_SOCKS5_CMD;
+		gcp->conn_state = ctx->s5auth ? CONN_STATE_SOCKS5_AUTH_USERPASS
+					      : CONN_STATE_SOCKS5_CMD;
 		r = 0;
 	} else {
 		gcp->conn_state = CONN_STATE_SOCKS5_ERR;
@@ -2393,8 +2633,9 @@ static int exec_socks5_rep_cmd_err(struct gwp_conn_pair *gcp, uint8_t rep)
 	return gwp_conn_buf_append(&gcp->target, resp, resp_len);
 }
 
-static int exec_socks5_domain_async(struct gwp_wrk *w, const char *host,
-				    const char *port, struct gwp_conn_pair *gcp)
+static int exec_socks5_resolve_domain_async(struct gwp_wrk *w, const char *host,
+					    const char *port,
+					    struct gwp_conn_pair *gcp)
 {
 	struct gwp_dns *gdns = w->ctx->gdns;
 	struct gwp_dns_query *gdq;
@@ -2485,7 +2726,7 @@ static int handle_ev_client_socks5_cmd_connect(struct gwp_wrk *w,
 		snprintf(p, sizeof(p), "%hu", port);
 
 		if (w->ctx->gdns)
-			return exec_socks5_domain_async(w, h, p, gcp);
+			return exec_socks5_resolve_domain_async(w, h, p, gcp);
 
 		r = resolve_domain(h, p, gs);
 		if (r)
@@ -2616,6 +2857,118 @@ static int handle_ev_client_socks5_cmd(struct gwp_wrk *w,
 	return r;
 }
 
+static bool gwp_s5auth_authenticate(struct gwp_ctx *ctx,
+				    const char *u, uint32_t ulen,
+				    const char *p, uint32_t plen)
+{
+	struct gwp_socks5_auth *s5a = ctx->s5auth;
+	bool r = false;
+	size_t i;
+
+	pthread_rwlock_rdlock(&s5a->lock);
+	for (i = 0; i < s5a->nr; i++) {
+		struct gwp_socks5_user *ui = &s5a->users[i];
+		if (ui->ulen != ulen)
+			continue;
+		if (ui->plen != plen)
+			continue;
+		if (memcmp(ui->u, u, ulen))
+			continue;
+		if (ui->p && memcmp(ui->p, p, plen))
+			continue;
+		r = true;
+		break;
+	}
+	pthread_rwlock_unlock(&s5a->lock);
+	return r;
+}
+
+/*
+ *    Link: https://datatracker.ietf.org/doc/html/rfc1929#section-2
+ *
+ *    2.  Initial negotiation
+ *
+ *      Once the SOCKS V5 server has started, and the client has selected the
+ *      Username/Password Authentication protocol, the Username/Password
+ *      subnegotiation begins.  This begins with the client producing a
+ *      Username/Password request:
+ *
+ *              +----+------+----------+------+----------+
+ *              |VER | ULEN |  UNAME   | PLEN |  PASSWD  |
+ *              +----+------+----------+------+----------+
+ *              | 1  |  1   | 1 to 255 |  1   | 1 to 255 |
+ *              +----+------+----------+------+----------+
+ *
+ *      The VER field contains the current version of the subnegotiation,
+ *      which is X'01'. The ULEN field contains the length of the UNAME field
+ *      that follows. The UNAME field contains the username as known to the
+ *      source operating system. The PLEN field contains the length of the
+ *      PASSWD field that follows. The PASSWD field contains the password
+ *      association with the given UNAME.
+ *
+ *      The server verifies the supplied UNAME and PASSWD, and sends the
+ *      following response:
+ *
+ *                            +----+--------+
+ *                            |VER | STATUS |
+ *                            +----+--------+
+ *                            | 1  |   1    |
+ *                            +----+--------+
+ *
+ *      A STATUS field of X'00' indicates success. If the server returns a
+ *      `failure' (STATUS value other than X'00') status, it MUST close the
+ *      connection.
+ */
+static int handle_ev_client_socks5_auth_userpass(struct gwp_wrk *w,
+						 struct gwp_conn_pair *gcp)
+{
+	struct gwp_conn *c = &gcp->client;
+	uint8_t *buf = (uint8_t *)c->buf, resp[2];
+	uint32_t len = c->len, exp_len;
+	uint32_t ulen, plen;
+	char *u, *p;
+	int r;
+
+	exp_len = 2; /* VER + ULEN */
+	if (unlikely(len < exp_len))
+		return -EAGAIN;
+
+	if (unlikely(buf[0] != 0x01))
+		return -EINVAL;
+
+	ulen = buf[1];
+	exp_len += ulen + 1; /* UNAME + PLEN */
+	if (unlikely(len < exp_len))
+		return -EAGAIN;
+
+	plen = buf[2 + ulen];
+	exp_len += plen;
+	if (unlikely(len < exp_len))
+		return -EAGAIN;
+
+	u = (char *)&buf[2];
+	p = (char *)&buf[2 + ulen + 1];
+	if (gwp_s5auth_authenticate(w->ctx, u, ulen, p, plen)) {
+		resp[0] = 0x01; /* VER */
+		resp[1] = 0x00; /* STATUS: success */
+		r = 0;
+		gcp->conn_state = CONN_STATE_SOCKS5_CMD;
+		pr_info(w->ctx, "SOCKS5 authentication succeeded for user: %.*s",
+			(int)ulen, u);
+	} else {
+		resp[0] = 0x01; /* VER */
+		resp[1] = 0x01; /* STATUS: failure */
+		r = -EPERM;
+		gcp->conn_state = CONN_STATE_SOCKS5_ERR;
+	}
+
+	if (gwp_conn_buf_append(&gcp->target, resp, 2))
+		return -ENOMEM;
+
+	gwp_conn_buf_advance(c, exp_len);
+	return r;
+}
+
 static int handle_short_send_socks5_data(struct gwp_wrk *w,
 					 struct gwp_conn_pair *gcp)
 {
@@ -2679,9 +3032,10 @@ repeat:
 	r = -EINVAL;
 	switch (s) {
 	case CONN_STATE_SOCKS5_INIT:
-		r = handle_ev_client_socks5_init(gcp);
+		r = handle_ev_client_socks5_init(w, gcp);
 		break;
 	case CONN_STATE_SOCKS5_AUTH_USERPASS:
+		r = handle_ev_client_socks5_auth_userpass(w, gcp);
 		break;
 	case CONN_STATE_SOCKS5_CMD:
 		r = handle_ev_client_socks5_cmd(w, gcp);
@@ -2749,6 +3103,30 @@ static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	return r;
 }
 
+static int handle_ev_socks5_auth_file(struct gwp_wrk *w)
+{
+	char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
+	struct gwp_ctx *ctx = w->ctx;
+	ssize_t r;
+
+	assert(ctx->cfg.as_socks5);
+	assert(ctx->s5auth);
+
+	r = gwp_load_s5auth(ctx);
+	if (unlikely(r))
+		return r;
+
+	r = read(ctx->s5auth->ino_fd, buf, sizeof(buf));
+	if (unlikely(r < 0)) {
+		r = -errno;
+		if (r == -EINTR || r == -EAGAIN)
+			return 0;
+		return r;
+	}
+
+	return 0;
+}
+
 static bool is_ev_bit_conn_pair(uint64_t ev_bit)
 {
 	static const uint64_t conn_pair_ev_bit =
@@ -2789,6 +3167,9 @@ static int handle_event(struct gwp_wrk *w, struct epoll_event *ev)
 		break;
 	case EV_BIT_DNS_QUERY:
 		r = handle_ev_dns_query(w, udata);
+		break;
+	case EV_BIT_SOCKS5_AUTH_FILE:
+		r = handle_ev_socks5_auth_file(w);
 		break;
 	default:
 		pr_err(w->ctx, "Unknown event bit: %" PRIu64, ev_bit);
@@ -2936,7 +3317,7 @@ int main(int argc, char *argv[])
 	prepare_rlimit();
 	r = gwp_ctx_init(&ctx);
 	if (r < 0)
-		goto out_free;
+		goto out;
 
 	g_ctx = &ctx;
 	r |= sigaction(SIGINT, &sa, NULL);
