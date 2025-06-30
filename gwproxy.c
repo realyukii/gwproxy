@@ -252,7 +252,7 @@ static void show_help(const char *app)
 	printf("  -h, --help                      Show this help message and exit\n");
 	printf("  -e, --event-loop=name           Specify the event loop to use (default: %s)\n", default_opts.event_loop);
 	printf("                                  Available values: epoll, io_uring\n");
-	printf("  -b, --bind=addr_port            Bind to the specified address (default: %s)\n", default_opts.bind);
+	printf("  -b, --bind=addr:port            Bind to the specified address (default: %s)\n", default_opts.bind);
 	printf("  -t, --target=addr_port          Target address to connect to\n");
 	printf("  -S, --as-socks5=0|1             Run as a SOCKS5 proxy (default: %d)\n", default_opts.as_socks5);
 	printf("  -o, --socks5-timeout=sec        SOCKS5 auth timeout in seconds (default: %d)\n", default_opts.socks5_timeout);
