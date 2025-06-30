@@ -1456,6 +1456,13 @@ static int adjust_epl_mask(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	return 0;
 }
 
+static void gwp_conn_buf_advance(struct gwp_conn *conn, size_t len)
+{
+	conn->len -= len;
+	if (conn->len)
+		memmove(conn->buf, conn->buf + len, conn->len);
+}
+
 static int do_splice(struct gwp_conn *src, struct gwp_conn *dst, bool do_recv,
 		     bool do_send)
 {
@@ -1490,9 +1497,7 @@ static int do_splice(struct gwp_conn *src, struct gwp_conn *dst, bool do_recv,
 			return -ECONNRESET;
 		}
 
-		src->len -= (size_t)ret;
-		if (src->len)
-			memmove(src->buf, src->buf + ret, src->len);
+		gwp_conn_buf_advance(src, (size_t)ret);
 	}
 
 	return 0;
@@ -1642,13 +1647,6 @@ static int gwp_conn_buf_append(struct gwp_conn *conn, const void *data,
 	memcpy(conn->buf + conn->len, data, len);
 	conn->len += len;
 	return 0;
-}
-
-static void gwp_conn_buf_advance(struct gwp_conn *conn, size_t len)
-{
-	conn->len -= len;
-	if (conn->len)
-		memmove(conn->buf, conn->buf + len, conn->len);
 }
 
 static int read_timer(int fd)
