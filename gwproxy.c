@@ -2433,6 +2433,8 @@ static int handle_ev_client_socks5_init(struct gwp_wrk *w,
 		gcp->conn_state = CONN_STATE_SOCKS5_ERR;
 		wanted_method = 0xFF; /* NO ACCEPTABLE METHODS */
 		r = -ENOSYS;
+		pr_dbg(ctx, "No acceptable SOCKS5 method found, expecting %s",
+			ctx->s5auth ? "USERNAME/PASSWORD" : "NO AUTHENTICATION");
 	}
 
 	resp[1] = wanted_method; /* METHOD */
@@ -2960,6 +2962,8 @@ static int handle_ev_client_socks5_auth_userpass(struct gwp_wrk *w,
 		resp[1] = 0x01; /* STATUS: failure */
 		r = -EPERM;
 		gcp->conn_state = CONN_STATE_SOCKS5_ERR;
+		pr_info(w->ctx, "SOCKS5 authentication failed for user: %.*s",
+			(int)ulen, u);
 	}
 
 	if (gwp_conn_buf_append(&gcp->target, resp, 2))
@@ -3028,6 +3032,9 @@ repeat:
 
 	s = gcp->conn_state;
 	assert(CONN_STATE_SOCKS5_MIN <= s && s <= CONN_STATE_SOCKS5_MAX);
+
+	if (gcp->conn_state == CONN_STATE_SOCKS5_ERR)
+		return -EBADMSG;
 
 	r = -EINVAL;
 	switch (s) {
