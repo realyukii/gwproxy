@@ -344,6 +344,9 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 		case 'w':
 			cfg->nr_workers = atoi(optarg);
 			break;
+		case 'W':
+			cfg->nr_dns_workers = atoi(optarg);
+			break;
 		case 'c':
 			cfg->connect_timeout = atoi(optarg);
 			break;
