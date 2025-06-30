@@ -2210,6 +2210,29 @@ static int handle_ev_client_socks5_cmd(struct gwp_wrk *w,
 	return r;
 }
 
+static int handle_short_send_socks5_data(struct gwp_wrk *w,
+					 struct gwp_conn_pair *gcp)
+{
+	struct epoll_event ev;
+	int r;
+
+	if (adj_epl_out(&gcp->target, &gcp->client)) {
+		ev.events = gcp->client.ep_mask;
+		ev.data.u64 = 0;
+		ev.data.ptr = gcp;
+		ev.data.u64 |= EV_BIT_CLIENT_SOCKS5;
+		r = epoll_ctl(w->ep_fd, EPOLL_CTL_MOD, gcp->client.fd, &ev);
+		if (unlikely(r < 0))
+			return -errno;
+
+		r = -EAGAIN;
+	} else {
+		r = 0;
+	}
+
+	return r;
+}
+
 static int handle_ev_client_socks5(struct gwp_wrk *w,
 				   struct gwp_conn_pair *gcp,
 				   struct epoll_event *ev)
@@ -2225,6 +2248,19 @@ static int handle_ev_client_socks5(struct gwp_wrk *w,
 	}
 
 repeat:
+	if (ev->events & EPOLLOUT) {
+		r = do_splice(&gcp->target, &gcp->client, false, true);
+		if (r)
+			return r;
+
+		r = handle_short_send_socks5_data(w, gcp);
+		if (r)
+			return (r == -EAGAIN) ? 0 : r;
+
+		if (gcp->target.len)
+			return 0;
+	}
+
 	if (ev->events & EPOLLIN) {
 		r = do_splice(&gcp->client, &gcp->target, true, false);
 		if (r)
@@ -2253,9 +2289,8 @@ repeat:
 		return 0;
 
 	if (gcp->target.len) {
-		s = do_splice(&gcp->target, &gcp->client, false, true);
-		if (s)
-			return s;
+		ev->events |= EPOLLOUT;
+		goto repeat;
 	}
 
 	if (gcp->conn_state == CONN_STATE_SOCKS5_ERR)
