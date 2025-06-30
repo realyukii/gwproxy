@@ -42,6 +42,16 @@
 #define unlikely(x)	__builtin_expect(!!(x), 0)
 #endif
 
+#ifdef __CHECKER__
+#define __must_hold(x) __attribute__((context(x,1,1)))
+#define __acquires(x)  __attribute__((context(x,0,1)))
+#define __releases(x)  __attribute__((context(x,1,0)))
+#else
+#define __must_hold(x)
+#define __acquires(x)
+#define __releases(x)
+#endif
+
 static const struct option long_opts[] = {
 	{ "help",		no_argument,		NULL,	'h' },
 	{ "event-loop",		required_argument,	NULL,	'e' },
@@ -50,6 +60,7 @@ static const struct option long_opts[] = {
 	{ "as-socks5",		required_argument,	NULL,	'S' },
 	{ "socks5-timeout",	required_argument,	NULL,	'o' },
 	{ "nr-workers",		required_argument,	NULL,	'w' },
+	{ "nr-dns-workers",	required_argument,	NULL,	'W' },
 	{ "connect-timeout",	required_argument,	NULL,	'c' },
 	{ "target-buf-size",	required_argument,	NULL,	'T' },
 	{ "client-buf-size",	required_argument,	NULL,	'C' },
@@ -72,6 +83,7 @@ struct gwp_cfg {
 	bool		as_socks5;
 	int		socks5_timeout;
 	int		nr_workers;
+	int		nr_dns_workers;
 	int		connect_timeout;
 	int		target_buf_size;
 	int		client_buf_size;
@@ -93,6 +105,7 @@ static const struct gwp_cfg default_opts = {
 	.as_socks5		= false,
 	.socks5_timeout		= 10,
 	.nr_workers		= 4,
+	.nr_dns_workers		= 4,
 	.connect_timeout	= 5,
 	.target_buf_size	= 2048,
 	.client_buf_size	= 2048,
@@ -116,6 +129,7 @@ enum {
 	EV_BIT_CLIENT		= (4ull << 48ull),
 	EV_BIT_TIMER		= (5ull << 48ull),
 	EV_BIT_CLIENT_SOCKS5	= (6ull << 48ull),
+	EV_BIT_DNS_QUERY	= (7ull << 48ull),
 };
 
 #define EV_BIT_ALL	(0xffffull << 48ull)
@@ -131,6 +145,7 @@ enum {
 	CONN_STATE_SOCKS5_CMD		= 220,
 	CONN_STATE_SOCKS5_CMD_CONNECT	= 221,
 	CONN_STATE_SOCKS5_ERR		= 250,
+	CONN_STATE_SOCKS5_DNS_QUERY	= 260,
 	CONN_STATE_SOCKS5_MAX		= 299,
 
 	CONN_STATE_FORWARDING		= 301,
@@ -152,6 +167,8 @@ struct gwp_sockaddr {
 	};
 };
 
+struct gwp_dns_query;
+
 struct gwp_conn_pair {
 	struct gwp_conn		target;
 	struct gwp_conn		client;
@@ -159,6 +176,7 @@ struct gwp_conn_pair {
 	int			conn_state;
 	int			timer_fd;
 	uint32_t		idx;
+	struct gwp_dns_query	*gdq;
 	struct gwp_sockaddr	client_addr;
 	struct gwp_sockaddr	target_addr;
 };
@@ -190,10 +208,37 @@ struct gwp_wrk {
 	pthread_t		thread;
 };
 
+struct gwp_wrk_dns {
+	pthread_t		thread;
+	struct gwp_ctx		*ctx;
+	uint32_t		idx;
+};
+
+struct gwp_dns_query {
+	int			res;
+	int			ev_fd;
+	char			host[256];
+	char			service[sizeof("65535")];
+	struct gwp_sockaddr	result;
+	struct gwp_dns_query	*next;
+	_Atomic(int32_t)	ref_count;
+};
+
+struct gwp_dns {
+	pthread_mutex_t		lock;
+	pthread_cond_t		cond;
+	struct gwp_dns_query	*head;
+	struct gwp_dns_query	*tail;
+	struct gwp_wrk_dns	*workers;
+	uint32_t		nr_sleeping;
+	uint32_t		nr_queries;
+};
+
 struct gwp_ctx {
 	volatile bool			stop;
 	FILE				*log_file;
 	struct gwp_wrk			*workers;
+	struct gwp_dns			*gdns;
 	struct gwp_sockaddr		target_addr;
 	struct gwp_cfg			cfg;
 	_Atomic(int32_t)		nr_fd_closed;
@@ -212,6 +257,7 @@ static void show_help(const char *app)
 	printf("  -S, --as-socks5=0|1             Run as a SOCKS5 proxy (default: %d)\n", default_opts.as_socks5);
 	printf("  -o, --socks5-timeout=sec        SOCKS5 auth timeout in seconds (default: %d)\n", default_opts.socks5_timeout);
 	printf("  -w, --nr-workers=nr             Number of worker threads (default: %d)\n", default_opts.nr_workers);
+	printf("  -W, --nr-dns-workers=nr         Number of DNS worker threads for SOCKS5 (default: %d)\n", default_opts.nr_dns_workers);
 	printf("  -c, --connect-timeout=sec       Connection to target timeout in seconds (default: %d)\n", default_opts.connect_timeout);
 	printf("  -T, --target-buf-size=nr        Target buffer size in bytes (default: %d)\n", default_opts.target_buf_size);
 	printf("  -C, --client-buf-size=nr        Client buffer size in bytes (default: %d)\n", default_opts.client_buf_size);
@@ -846,6 +892,304 @@ static void gwp_ctx_free_threads(struct gwp_ctx *ctx)
 	ctx->workers = NULL;
 }
 
+static int resolve_domain(const char *host, const char *service,
+			  struct gwp_sockaddr *addr)
+{
+	static const struct addrinfo hints = {
+		.ai_family = AF_UNSPEC,
+		.ai_socktype = SOCK_STREAM,
+	};
+	struct addrinfo *res = NULL, *ai;
+	bool found = false;
+	int r;
+
+	r = getaddrinfo(host, service, &hints, &res);
+	if (r < 0 || !res)
+		return -EHOSTUNREACH;
+
+	for (ai = res; ai; ai = ai->ai_next) {
+		if (ai->ai_family == AF_INET) {
+			addr->i4 = *(struct sockaddr_in *)ai->ai_addr;
+			found = true;
+			break;
+		} else if (ai->ai_family == AF_INET6) {
+			addr->i6 = *(struct sockaddr_in6 *)ai->ai_addr;
+			found = true;
+			break;
+		}
+	}
+	freeaddrinfo(res);
+	return found ? 0 : -EHOSTUNREACH;
+}
+
+static struct gwp_dns_query *gwp_gdns_push_query(const char host[256],
+						 const char port[6],
+						 struct gwp_dns *gdns)
+{
+	struct gwp_dns_query *gdq;
+	size_t l;
+	int fd;
+
+	gdq = calloc(1, sizeof(*gdq));
+	if (!gdq)
+		return NULL;
+
+	fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+	if (fd < 0) {
+		free(gdq);
+		return NULL;
+	}
+
+	gdq->ev_fd = fd;
+	atomic_init(&gdq->ref_count, 2);
+
+	l = sizeof(gdq->host) - 1;
+	strncpy(gdq->host, host, l);
+	gdq->host[l] = '\0';
+
+	l = sizeof(gdq->service) - 1;
+	strncpy(gdq->service, port, l);
+	gdq->service[l] = '\0';
+
+	pthread_mutex_lock(&gdns->lock);
+	if (gdns->tail)
+		gdns->tail->next = gdq;
+	else
+		gdns->head = gdq;
+	gdns->tail = gdq;
+	gdq->next = NULL;
+	gdns->nr_queries++;
+	if (gdns->nr_sleeping)
+		pthread_cond_signal(&gdns->cond);
+	pthread_mutex_unlock(&gdns->lock);
+	return gdq;
+}
+
+static struct gwp_dns_query *__gwp_gdns_pop_query(struct gwp_dns *gdns)
+	__must_hold(&gdns->lock)
+{
+	struct gwp_dns_query *gdq = gdns->head;
+
+	if (!gdq)
+		return NULL;
+
+	gdns->head = gdq->next;
+	if (!gdns->head)
+		gdns->tail = NULL;
+
+	gdns->nr_queries--;
+	return gdq;
+}
+
+static void gwp_gdns_free_query(struct gwp_dns_query *gdq)
+{
+	if (!gdq)
+		return;
+
+	if (gdq->ev_fd >= 0) {
+		close(gdq->ev_fd);
+		gdq->ev_fd = -1;
+	}
+	free(gdq);
+}
+
+static void gwp_gdns_put_query(struct gwp_dns_query *gdq)
+{
+	if (!gdq)
+		return;
+
+	if (atomic_fetch_sub(&gdq->ref_count, 1) == 1)
+		gwp_gdns_free_query(gdq);
+}
+
+static void __gwp_gdns_reap_query(struct gwp_wrk_dns *wdns, struct gwp_ctx *ctx,
+				  struct gwp_dns *gdns)
+	__must_hold(&gdns->lock)
+{
+	struct gwp_dns_query *gdq;
+
+	gdq = __gwp_gdns_pop_query(gdns);
+	if (!gdq)
+		return;
+
+	pthread_mutex_unlock(&gdns->lock);
+	if (atomic_load(&gdq->ref_count) == 1) {
+		/*
+		 * The client closed the connection before the
+		 * DNS query is processed.
+		 */
+		pr_dbg(ctx, "DNS query put early (idx=%u, host=%s, service=%s)",
+			wdns->idx, gdq->host, gdq->service);
+		gwp_gdns_free_query(gdq);
+		goto out_lock;
+	}
+
+	memset(&gdq->result, 0, sizeof(gdq->result));
+	gdq->res = resolve_domain(gdq->host, gdq->service, &gdq->result);
+	eventfd_write(gdq->ev_fd, 1);
+	gwp_gdns_put_query(gdq);
+
+out_lock:
+	pthread_mutex_lock(&gdns->lock);
+}
+
+static void __gwp_gdns_cond_wait(struct gwp_wrk_dns *wdns, struct gwp_ctx *ctx,
+				 struct gwp_dns *gdns)
+	__must_hold(&gdns->lock)
+{
+	gdns->nr_sleeping++;
+
+	pr_dbg(ctx, "DNS worker %u is waiting for queries (nr_sleeping=%u)",
+		wdns->idx, gdns->nr_sleeping);
+
+	pthread_cond_wait(&gdns->cond, &gdns->lock);
+	gdns->nr_sleeping--;
+
+	pr_dbg(ctx, "DNS worker %u woke up (nr_sleeping=%u)", wdns->idx,
+		gdns->nr_sleeping);
+}
+
+static void *gwp_ctx_dns_thread_entry(void *arg)
+{
+	struct gwp_wrk_dns *wdns = arg;
+	struct gwp_ctx *ctx = wdns->ctx;
+	struct gwp_dns *gdns = ctx->gdns;
+
+	pr_info(ctx, "DNS worker %u started", wdns->idx);
+
+	pthread_mutex_lock(&gdns->lock);
+	while (!ctx->stop) {
+		if (gdns->head)
+			__gwp_gdns_reap_query(wdns, ctx, gdns);
+		else
+			__gwp_gdns_cond_wait(wdns, ctx, gdns);
+	}
+	pthread_mutex_unlock(&gdns->lock);
+
+	pr_info(ctx, "DNS worker %u is stopping", wdns->idx);
+	return NULL;
+}
+
+static int gwp_ctx_init_dns(struct gwp_ctx *ctx)
+{
+	struct gwp_cfg *cfg = &ctx->cfg;
+	struct gwp_dns *gdns;
+	int i, r;
+
+	if (!cfg->as_socks5 || cfg->nr_dns_workers <= 0) {
+		ctx->gdns = NULL;
+		return 0;
+	}
+
+	gdns = calloc(1, sizeof(*gdns));
+	if (!gdns) {
+		pr_err(ctx, "Failed to allocate memory for DNS context");
+		return -ENOMEM;
+	}
+
+	gdns->workers = calloc(cfg->nr_dns_workers, sizeof(*gdns->workers));
+	if (!gdns->workers) {
+		r = -ENOMEM;
+		pr_err(ctx, "Failed to allocate memory for DNS workers: %s",
+			strerror(-r));
+		goto out_free_gdns;
+	}
+
+	r = pthread_mutex_init(&gdns->lock, NULL);
+	if (r) {
+		r = -r;
+		pr_err(ctx, "Failed to initialize DNS mutex: %s", strerror(r));
+		goto out_free_workers;
+	}
+
+	r = pthread_cond_init(&gdns->cond, NULL);
+	if (r) {
+		r = -r;
+		pr_err(ctx, "Failed to initialize DNS condvar: %s", strerror(r));
+		goto out_free_lock;
+	}
+
+	ctx->gdns = gdns;
+	for (i = 0; i < cfg->nr_dns_workers; i++) {
+		struct gwp_wrk_dns *wdns = &gdns->workers[i];
+		char tmp[128];
+
+		wdns->ctx = ctx;
+		wdns->idx = (uint32_t)i;
+		r = pthread_create(&wdns->thread, NULL,
+				   &gwp_ctx_dns_thread_entry, wdns);
+		if (r) {
+			r = -r;
+			pr_err(ctx, "Failed to create DNS worker thread %d: %s",
+			       i, strerror(r));
+			goto out_join_workers;
+		}
+
+		snprintf(tmp, sizeof(tmp), "gwproxy-dns-%d", i);
+		pthread_setname_np(wdns->thread, tmp);
+	}
+
+	return 0;
+out_join_workers:
+	pthread_mutex_lock(&gdns->lock);
+	ctx->stop = true;
+	pthread_cond_broadcast(&gdns->cond);
+	pthread_mutex_unlock(&gdns->lock);
+	while (i--) {
+		struct gwp_wrk_dns *wdns = &gdns->workers[i];
+		pthread_join(wdns->thread, NULL);
+	}
+	pthread_cond_destroy(&gdns->cond);
+out_free_lock:
+	pthread_mutex_destroy(&gdns->lock);
+out_free_workers:
+	free(gdns->workers);
+out_free_gdns:
+	free(gdns);
+	ctx->gdns = NULL;
+	return r;
+}
+
+static void gwp_ctx_free_dns(struct gwp_ctx *ctx)
+{
+	struct gwp_dns *gdns = ctx->gdns;
+	struct gwp_dns_query *gdq, *next;
+	int i;
+
+	if (!gdns)
+		return;
+
+	pthread_mutex_lock(&gdns->lock);
+	ctx->stop = true;
+	pthread_cond_broadcast(&gdns->cond);
+	pthread_mutex_unlock(&gdns->lock);
+
+	for (i = 0; i < ctx->cfg.nr_dns_workers; i++) {
+		struct gwp_wrk_dns *wdns = &gdns->workers[i];
+		pthread_join(wdns->thread, NULL);
+	}
+
+	gdq = gdns->head;
+	i = 0;
+	while (gdq) {
+		next = gdq->next;
+		if (gdq->ev_fd >= 0)
+			close(gdq->ev_fd);
+		free(gdq);
+		gdq = next;
+		i++;
+	}
+	(void)i;
+	pr_dbg(ctx, "Freed %u unprocessed DNS queries", i);
+
+	free(gdns->workers);
+	pthread_mutex_destroy(&gdns->lock);
+	pthread_cond_destroy(&gdns->cond);
+	free(gdns);
+	ctx->gdns = NULL;
+	pr_dbg(ctx, "DNS workers stopped and resources freed");
+}
+
 static int gwp_ctx_init(struct gwp_ctx *ctx)
 {
 	int r;
@@ -853,6 +1197,12 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 	r = gwp_ctx_init_log(ctx);
 	if (r < 0)
 		return r;
+
+	r = gwp_ctx_init_dns(ctx);
+	if (r < 0) {
+		pr_err(ctx, "Failed to initialize DNS workers: %s", strerror(-r));
+		goto out_free_log;
+	}
 
 	if (!ctx->cfg.as_socks5) {
 		const char *t = ctx->cfg.target;
@@ -870,11 +1220,13 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 	if (r < 0) {
 		pr_err(ctx, "Failed to initialize worker threads: %s",
 			strerror(-r));
-		goto out_free_log;
+		goto out_free_dns;
 	}
 
 	return 0;
 
+out_free_dns:
+	gwp_ctx_free_dns(ctx);
 out_free_log:
 	gwp_ctx_free_log(ctx);
 	return r;
@@ -900,6 +1252,7 @@ static void gwp_ctx_free(struct gwp_ctx *ctx)
 {
 	gwp_ctx_stop(ctx);
 	gwp_ctx_free_threads(ctx);
+	gwp_ctx_free_dns(ctx);
 	gwp_ctx_free_log(ctx);
 }
 
@@ -1017,6 +1370,7 @@ static int free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct gwp_conn_slot *gcs = &w->conn_slot;
 	struct gwp_ctx *ctx = w->ctx;
+	struct gwp_dns_query *gdq;
 	struct gwp_conn_pair *tmp;
 	uint32_t i = gcp->idx;
 	int nr_fd_closed = 0;
@@ -1026,6 +1380,15 @@ static int free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	assert(tmp == gcp);
 	if (unlikely(tmp != gcp))
 		return -EINVAL;
+
+	gdq = gcp->gdq;
+	if (gdq) {
+		if (epoll_ctl(w->ep_fd, EPOLL_CTL_DEL, gdq->ev_fd, NULL))
+			return -errno;
+
+		gwp_gdns_put_query(gdq);
+		gcp->gdq = NULL;
+	}
 
 	if (gcp->client.fd >= 0) {
 		nr_fd_closed++;
@@ -2029,6 +2392,34 @@ static int exec_socks5_rep_cmd_err(struct gwp_conn_pair *gcp, uint8_t rep)
 	return gwp_conn_buf_append(&gcp->target, resp, resp_len);
 }
 
+static int exec_socks5_domain_async(struct gwp_wrk *w, const char *host,
+				    const char *port, struct gwp_conn_pair *gcp)
+{
+	struct gwp_dns *gdns = w->ctx->gdns;
+	struct gwp_dns_query *gdq;
+	struct epoll_event ev;
+	int r;
+
+	pr_dbg(w->ctx, "Resolving %s:%s (nr_queries=%u)", host, port, gdns->nr_queries);
+	gdq = gwp_gdns_push_query(host, port, gdns);
+	if (unlikely(!gdq))
+		return -ENOMEM;
+
+	ev.events = EPOLLIN | EPOLLONESHOT;
+	ev.data.u64 = 0;
+	ev.data.ptr = gcp;
+	ev.data.u64 |= EV_BIT_DNS_QUERY;
+	if (unlikely(epoll_ctl(w->ep_fd, EPOLL_CTL_ADD, gdq->ev_fd, &ev))) {
+		r = -errno;
+		gwp_gdns_put_query(gdq);
+		return r;
+	}
+
+	gcp->conn_state = CONN_STATE_SOCKS5_DNS_QUERY;
+	gcp->gdq = gdq;
+	return 0;
+}
+
 static int handle_ev_client_socks5_cmd_connect(struct gwp_wrk *w,
 					       struct gwp_conn_pair *gcp)
 {
@@ -2075,16 +2466,32 @@ static int handle_ev_client_socks5_cmd_connect(struct gwp_wrk *w,
 		memcpy(&gs->i4.sin_addr, &buf[4], 4);
 		memcpy(&gs->i4.sin_port, &buf[8], 2);
 		break;
-	case 0x03: /* Domain name */
-		/*
-		 * TODO(ammarfaizi2): Implement domain name resolution.
-		 */
-		return -ENOSYS;
 	case 0x04: /* IPv6 address */
 		gs->sa.sa_family = AF_INET6;
 		memcpy(&gs->i6.sin6_addr, &buf[4], 16);
 		memcpy(&gs->i6.sin6_port, &buf[20], 2);
 		break;
+	case 0x03: { /* Domain name */
+		uint8_t hlen = buf[4];
+		char h[256], p[6];
+		uint16_t port;
+		int r;
+
+		memcpy(h, &buf[5], hlen);
+		h[hlen] = '\0';
+		memcpy(&port, &buf[5 + hlen], 2);
+		port = ntohs(port);
+		snprintf(p, sizeof(p), "%hu", port);
+
+		if (w->ctx->gdns)
+			return exec_socks5_domain_async(w, h, p, gcp);
+
+		r = resolve_domain(h, p, gs);
+		if (r)
+			return exec_socks5_connect_reply(w, gcp, r);
+
+		break;
+	}
 	}
 
 	return exec_socks5_connect(w, gcp);
@@ -2300,11 +2707,52 @@ repeat:
 	return r;
 }
 
+static void log_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
+			  struct gwp_dns_query *gdq)
+{
+	struct gwp_ctx *ctx = w->ctx;
+
+	if (gdq->res) {
+		pr_dbg(ctx, "DNS query failed: %s:%s (res=%d; idx=%u; cfd=%d; tfd=%d; ca=%s)",
+			gdq->host, gdq->service, gdq->res,
+			gcp->idx, gcp->client.fd, gcp->target.fd,
+			ip_to_str(&gcp->client_addr));
+		return;
+	}
+
+	pr_dbg(ctx, "DNS query resolved: %s:%s -> %s (res=%d; idx=%u; cfd=%d; tfd=%d; ca=%s)",
+		gdq->host, gdq->service, ip_to_str(&gdq->result), gdq->res,
+		gcp->idx, gcp->client.fd, gcp->target.fd,
+		ip_to_str(&gcp->client_addr));
+}
+
+static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	struct gwp_dns_query *gdq = gcp->gdq;
+	int r;
+
+	assert(gdq);
+	assert(gdq->ev_fd >= 0);
+	assert(gcp->conn_state == CONN_STATE_SOCKS5_DNS_QUERY);
+
+	gcp->gdq = NULL;
+	log_dns_query(w, gcp, gdq);
+	if (likely(!gdq->res)) {
+		gcp->target_addr = gdq->result;
+		r = exec_socks5_connect(w, gcp);
+	} else {
+		r = exec_socks5_connect_reply(w, gcp, gdq->res);
+	}
+
+	gwp_gdns_put_query(gdq);
+	return r;
+}
+
 static bool is_ev_bit_conn_pair(uint64_t ev_bit)
 {
 	static const uint64_t conn_pair_ev_bit =
 		EV_BIT_CLIENT | EV_BIT_TARGET | EV_BIT_TIMER |
-		EV_BIT_CLIENT_SOCKS5;
+		EV_BIT_CLIENT_SOCKS5 | EV_BIT_DNS_QUERY;
 
 	return !!(ev_bit & conn_pair_ev_bit);
 }
@@ -2337,6 +2785,9 @@ static int handle_event(struct gwp_wrk *w, struct epoll_event *ev)
 		break;
 	case EV_BIT_CLIENT_SOCKS5:
 		r = handle_ev_client_socks5(w, udata, ev);
+		break;
+	case EV_BIT_DNS_QUERY:
+		r = handle_ev_dns_query(w, udata);
 		break;
 	default:
 		pr_err(w->ctx, "Unknown event bit: %" PRIu64, ev_bit);
