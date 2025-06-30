@@ -2187,6 +2187,9 @@ static int handle_ev_target(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 			return r;
 	}
 
+	if (ev->events & (EPOLLRDHUP | EPOLLHUP))
+		return -ECONNRESET;
+
 	return adjust_epl_mask(w, gcp);
 }
 
@@ -2211,6 +2214,9 @@ static int handle_ev_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 		if (r)
 			return r;
 	}
+
+	if (ev->events & (EPOLLRDHUP | EPOLLHUP))
+		return -ECONNRESET;
 
 	return adjust_epl_mask(w, gcp);
 }
