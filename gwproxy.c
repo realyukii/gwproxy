@@ -34,6 +34,7 @@
 #include <sys/eventfd.h>
 #include <netinet/tcp.h>
 #include <sys/timerfd.h>
+#include <sys/resource.h>
 
 #ifndef likely
 #define likely(x)	__builtin_expect(!!(x), 1)
@@ -2902,6 +2903,25 @@ static void sig_handler(int sig)
 	(void)sig;
 }
 
+static void prepare_rlimit(void)
+{
+	struct rlimit rl;
+	int r;
+
+	r = getrlimit(RLIMIT_NOFILE, &rl);
+	if (r < 0) {
+		fprintf(stderr, "Failed to get RLIMIT_NOFILE: %s\n", strerror(errno));
+		return;
+	}
+
+	rl.rlim_cur = rl.rlim_max;
+	r = setrlimit(RLIMIT_NOFILE, &rl);
+	if (r < 0) {
+		fprintf(stderr, "Failed to set RLIMIT_NOFILE: %s\n", strerror(errno));
+		return;
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	struct sigaction sa = { .sa_handler = &sig_handler };
@@ -2913,6 +2933,7 @@ int main(int argc, char *argv[])
 	if (r < 0)
 		goto out;
 
+	prepare_rlimit();
 	r = gwp_ctx_init(&ctx);
 	if (r < 0)
 		goto out_free;
