@@ -2981,27 +2981,27 @@ static int handle_ev_client_socks5_auth_userpass(struct gwp_wrk *w,
 	return r;
 }
 
-static int handle_short_send_socks5_data(struct gwp_wrk *w,
-					 struct gwp_conn_pair *gcp)
+static int handle_socks5_pollout(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct epoll_event ev;
 	int r;
 
-	if (adj_epl_out(&gcp->target, &gcp->client)) {
-		ev.events = gcp->client.ep_mask;
-		ev.data.u64 = 0;
-		ev.data.ptr = gcp;
-		ev.data.u64 |= EV_BIT_CLIENT_SOCKS5;
-		r = epoll_ctl(w->ep_fd, EPOLL_CTL_MOD, gcp->client.fd, &ev);
-		if (unlikely(r < 0))
-			return -errno;
+	r = do_splice(&gcp->target, &gcp->client, false, true);
+	if (r)
+		return r;
 
-		r = -EAGAIN;
-	} else {
-		r = 0;
-	}
+	if (likely(!adj_epl_out(&gcp->target, &gcp->client)))
+		return 0;
 
-	return r;
+	pr_dbg(w->ctx, "Handling short send for client SOCKS5 connection");
+	ev.events = gcp->client.ep_mask;
+	ev.data.u64 = 0;
+	ev.data.ptr = gcp;
+	ev.data.u64 |= EV_BIT_CLIENT_SOCKS5;
+	if (unlikely(epoll_ctl(w->ep_fd, EPOLL_CTL_MOD, gcp->client.fd, &ev)))
+		return -errno;
+
+	return -EAGAIN;
 }
 
 static int handle_ev_client_socks5(struct gwp_wrk *w,
@@ -3019,17 +3019,10 @@ static int handle_ev_client_socks5(struct gwp_wrk *w,
 	}
 
 repeat:
-	if (ev->events & EPOLLOUT) {
-		r = do_splice(&gcp->target, &gcp->client, false, true);
-		if (r)
-			return r;
-
-		r = handle_short_send_socks5_data(w, gcp);
+	if (unlikely(ev->events & EPOLLOUT)) {
+		r = handle_socks5_pollout(w, gcp);
 		if (r)
 			return (r == -EAGAIN) ? 0 : r;
-
-		if (gcp->target.len)
-			return 0;
 	}
 
 	if (ev->events & EPOLLIN) {
