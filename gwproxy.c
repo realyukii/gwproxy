@@ -2063,41 +2063,68 @@ static void gwp_conn_buf_advance(struct gwp_conn *conn, size_t len)
 		memmove(conn->buf, conn->buf + len, conn->len);
 }
 
-static int do_splice(struct gwp_conn *src, struct gwp_conn *dst, bool do_recv,
-		     bool do_send)
+static ssize_t __do_recv(struct gwp_conn *src)
 {
-	ssize_t ret = 0;
+	ssize_t ret;
 	size_t len;
 	char *buf;
 
-	buf = src->buf + src->len;
 	len = src->cap - src->len;
-	if (do_recv && len > 0) {
-		ret = recv(src->fd, buf, len, MSG_NOSIGNAL);
-		if (unlikely(ret < 0)) {
-			ret = -errno;
-			if (ret != -EAGAIN && ret != -EINTR)
-				return ret;
-			ret = 0;
-		} else if (!ret) {
-			return -ECONNRESET;
-		}
+	if (unlikely(len == 0))
+		return 0;
 
-		src->len += (size_t)ret;
+	buf = src->buf + src->len;
+	ret = recv(src->fd, buf, len, MSG_NOSIGNAL);
+	if (unlikely(ret < 0)) {
+		ret = -errno;
+		if (ret != -EAGAIN && ret != -EINTR)
+			return ret;
+		ret = 0;
+	} else if (!ret) {
+		return -ECONNRESET;
 	}
 
-	if (do_send && src->len > 0) {
-		ret = send(dst->fd, src->buf, src->len, MSG_NOSIGNAL);
-		if (unlikely(ret < 0)) {
-			ret = -errno;
-			if (ret != -EAGAIN && ret != -EINTR)
-				return ret;
-			ret = 0;
-		} else if (!ret) {
-			return -ECONNRESET;
-		}
+	src->len += (size_t)ret;
+	assert(src->len <= src->cap);
+	return ret;
+}
 
-		gwp_conn_buf_advance(src, (size_t)ret);
+static ssize_t __do_send(struct gwp_conn *src, struct gwp_conn *dst)
+{
+	ssize_t ret;
+
+	if (unlikely(src->len == 0))
+		return 0;
+
+	ret = send(dst->fd, src->buf, src->len, MSG_NOSIGNAL);
+	if (unlikely(ret < 0)) {
+		ret = -errno;
+		if (ret != -EAGAIN && ret != -EINTR)
+			return ret;
+		ret = 0;
+	} else if (!ret) {
+		return -ECONNRESET;
+	}
+
+	gwp_conn_buf_advance(src, (size_t)ret);
+	return ret;
+}
+
+static int do_splice(struct gwp_conn *src, struct gwp_conn *dst, bool do_recv,
+		     bool do_send)
+{
+	ssize_t ret;
+
+	if (do_recv) {
+		ret = __do_recv(src);
+		if (unlikely(ret < 0))
+			return ret;
+	}
+
+	if (do_send) {
+		ret = __do_send(src, dst);
+		if (unlikely(ret < 0))
+			return ret;
 	}
 
 	return 0;
