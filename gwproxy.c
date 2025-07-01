@@ -2406,12 +2406,12 @@ static int exec_socks5_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 static int handle_ev_client_socks5_init(struct gwp_wrk *w,
 					struct gwp_conn_pair *gcp)
 {
-	uint8_t *buf = (uint8_t *)gcp->client.buf, nr_methods, wanted_method;
-	uint32_t len = gcp->client.len, exp_len, resp_len;
-	struct gwp_ctx *ctx = w->ctx;
-	uint8_t resp[2];
-	bool found;
-	int r, s;
+	uint8_t *buf = (uint8_t *)gcp->client.buf;
+	uint8_t resp[2], nmethods, exp_method;
+	size_t len = gcp->client.len;
+	int next_conn_state;
+	bool method_found;
+	uint32_t exp_len;
 
 	exp_len = 2; /* VER + NMETHODS */
 	if (unlikely(len < exp_len))
@@ -2420,38 +2420,37 @@ static int handle_ev_client_socks5_init(struct gwp_wrk *w,
 	if (unlikely(buf[0] != 0x05))
 		return -EINVAL;
 
-	nr_methods = buf[1];
-	exp_len += (uint32_t)nr_methods;
+	nmethods = buf[1];
+	exp_len += nmethods;
 	if (unlikely(len < exp_len))
 		return -EAGAIN;
 
-	gwp_conn_buf_advance(&gcp->client, exp_len);
-	/*
-	 * USERNAME/PASSWORD or NO AUTHENTICATION.
-	 */
-	wanted_method = ctx->s5auth ? 0x02 : 0x00;
-
-	found = !!memchr(buf + 2, wanted_method, nr_methods);
-	resp_len = 2; /* VER + METHOD */
-	resp[0] = 0x05; /* VER */
-	if (found) {
-		gcp->conn_state = ctx->s5auth ? CONN_STATE_SOCKS5_AUTH_USERPASS
-					      : CONN_STATE_SOCKS5_CMD;
-		r = 0;
+	if (w->ctx->s5auth) {
+		exp_method = 0x02; /* USERNAME/PASSWORD */
+		next_conn_state = CONN_STATE_SOCKS5_AUTH_USERPASS;
 	} else {
-		gcp->conn_state = CONN_STATE_SOCKS5_ERR;
-		wanted_method = 0xFF; /* NO ACCEPTABLE METHODS */
-		r = -ENOSYS;
-		pr_dbg(ctx, "No acceptable SOCKS5 method found, expecting %s",
-			ctx->s5auth ? "USERNAME/PASSWORD" : "NO AUTHENTICATION");
+		exp_method = 0x00; /* NO AUTHENTICATION REQUIRED */
+		next_conn_state = CONN_STATE_SOCKS5_CMD;
 	}
 
-	resp[1] = wanted_method; /* METHOD */
-	s = gwp_conn_buf_append(&gcp->target, resp, resp_len);
-	if (s)
-		return s;
+	if (likely(nmethods > 0))
+		method_found = !!memchr(&buf[2], exp_method, nmethods);
+	else
+		method_found = false;
 
-	return r;
+	if (!method_found) {
+		next_conn_state = CONN_STATE_SOCKS5_ERR;
+		exp_method = 0xFF; /* NO ACCEPTABLE METHODS */
+	}
+
+	resp[0] = 0x05; /* VER */
+	resp[1] = exp_method; /* METHOD */
+	if (gwp_conn_buf_append(&gcp->target, resp, 2))
+		return -ENOMEM;
+
+	gcp->conn_state = next_conn_state;
+	gwp_conn_buf_advance(&gcp->client, exp_len);
+	return 0;
 }
 
 /*
