@@ -3011,11 +3011,11 @@ static int handle_ev_client_socks5_auth_userpass(struct gwp_wrk *w,
 static int handle_socks5_pollout(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct epoll_event ev;
-	int r;
+	ssize_t sr;
 
-	r = do_splice(&gcp->target, &gcp->client, false, true);
-	if (r)
-		return r;
+	sr = __do_send(&gcp->target, &gcp->client);
+	if (unlikely(sr < 0))
+		return sr;
 
 	if (likely(!adj_epl_out(&gcp->target, &gcp->client)))
 		return 0;
@@ -3046,25 +3046,26 @@ static int handle_ev_client_socks5(struct gwp_wrk *w,
 	}
 
 repeat:
-	if (unlikely(ev->events & EPOLLOUT)) {
+	if (ev->events & EPOLLOUT) {
 		r = handle_socks5_pollout(w, gcp);
 		if (r)
 			return (r == -EAGAIN) ? 0 : r;
 	}
 
 	if (ev->events & EPOLLIN) {
-		r = do_splice(&gcp->client, &gcp->target, true, false);
-		if (r)
-			return r;
+		ssize_t sr = __do_recv(&gcp->client);
+		if (unlikely(sr < 0))
+			return sr;
 	}
 
 	s = gcp->conn_state;
 	assert(CONN_STATE_SOCKS5_MIN <= s && s <= CONN_STATE_SOCKS5_MAX);
+	if (unlikely(s == CONN_STATE_SOCKS5_ERR))
+		return -ECONNRESET;
 
-	if (gcp->conn_state == CONN_STATE_SOCKS5_ERR)
-		return -EBADMSG;
+	if (!gcp->client.len)
+		return 0;
 
-	r = -EINVAL;
 	switch (s) {
 	case CONN_STATE_SOCKS5_INIT:
 		r = handle_ev_client_socks5_init(w, gcp);
@@ -3077,24 +3078,19 @@ repeat:
 		break;
 	default:
 		pr_err(ctx, "Invalid SOCKS5 connection state: %d", s);
-		return -EINVAL;
+		r = -EINVAL;
+		break;
 	}
 
-	if (r == -EAGAIN)
-		return 0;
+	if (unlikely(r)) {
+		if (r != -EAGAIN)
+			return r;
+	}
 
-	if (gcp->target.len) {
+	if (likely(gcp->target.len))
 		ev->events |= EPOLLOUT;
-		goto repeat;
-	}
 
-	if (gcp->conn_state == CONN_STATE_SOCKS5_ERR)
-		return -EBADMSG;
-
-	if (!r && gcp->client.len)
-		goto repeat;
-
-	return r;
+	goto repeat;
 }
 
 static void log_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
