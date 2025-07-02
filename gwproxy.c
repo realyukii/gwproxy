@@ -1948,7 +1948,8 @@ static int gwp_load_s5auth(struct gwp_ctx *ctx)
 
 		r = gwp_load_s5auth_add_user(s5a, t);
 		if (r)
-			continue;
+			pr_err(ctx, "Failed to add user: %s (line='%s')",
+				t, strerror(-r));
 	}
 	rewind(s5a->handle);
 	l = s5a->nr;
