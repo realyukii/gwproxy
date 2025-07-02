@@ -3737,8 +3737,8 @@ static int handle_ev_client_socks5(struct gwp_wrk *w,
 
 	assert(ctx->cfg.as_socks5);
 
-	if (unlikely(ev->events & EPOLLERR)) {
-		pr_err(ctx, "EPOLLERR on client SOCKS5 event");
+	if (unlikely(ev->events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP))) {
+		pr_err(ctx, "(EPOLLERR|EPOLLHUP|EPOLLRDHUP) on client SOCKS5 event");
 		return -ECONNRESET;
 	}
 
