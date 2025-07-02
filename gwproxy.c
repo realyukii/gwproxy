@@ -1557,7 +1557,7 @@ static void gwp_gdns_handle_query_batch(struct gwp_wrk_dns *wdns,
 		struct gwp_dns_query *gdq;
 		struct gaicb req;
 	};
-	struct gwp_dns_query *gdq, *next, *prev, *head = gdns->head;
+	struct gwp_dns_query *gdq, *next, *head = gdns->head;
 	uint32_t nr_queries, nr_needed, i;
 	struct gaicb **reqs, *r;
 	struct req_data *data;
@@ -1589,7 +1589,7 @@ static void gwp_gdns_handle_query_batch(struct gwp_wrk_dns *wdns,
 	}
 
 	nr_needed = 0;
-	for (gdq = head, prev = NULL; gdq; gdq = next) {
+	for (gdq = head; gdq; gdq = next) {
 		next = gdq->next;
 		if (gwp_gdns_handle_put_early(wdns, ctx, gdq))
 			continue;
