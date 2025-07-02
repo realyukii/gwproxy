@@ -44,6 +44,18 @@
 #define unlikely(x)	__builtin_expect(!!(x), 0)
 #endif
 
+#ifndef __cold
+#define __cold		__attribute__((__cold__))
+#endif
+
+#ifndef __hot
+#define __hot		__attribute__((__hot__))
+#endif
+
+#ifndef noinline
+#define noinline	__attribute__((__noinline__))
+#endif
+
 #ifdef __CHECKER__
 #define __must_hold(x) __attribute__((context(x,1,1)))
 #define __acquires(x)  __attribute__((context(x,0,1)))
@@ -266,6 +278,7 @@ struct gwp_ctx {
 	_Atomic(int32_t)		nr_accept_stopped;
 };
 
+__cold
 static void show_help(const char *app)
 {
 	printf("Usage: %s [options]\n", app);
@@ -295,7 +308,7 @@ static void show_help(const char *app)
 	printf("\n");
 }
 
-
+__cold
 static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 {
 	#define NR_OPTS ((sizeof(long_opts) / sizeof(long_opts[0])) - 1)
@@ -413,6 +426,7 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 	return 0;
 }
 
+__hot
 __attribute__((__format__(printf, 3, 4)))
 static void __pr_log(FILE *handle, int level, const char *fmt, ...)
 {
@@ -494,6 +508,8 @@ do {						\
 
 
 #define FULL_ADDRSTRLEN (INET6_ADDRSTRLEN + sizeof(":65535[]") - 1)
+
+__hot
 static int convert_ssaddr_to_str(char buf[FULL_ADDRSTRLEN],
 				 const struct gwp_sockaddr *gs)
 {
@@ -522,6 +538,7 @@ static int convert_ssaddr_to_str(char buf[FULL_ADDRSTRLEN],
 	return 0;
 }
 
+__hot
 static const char *ip_to_str(const struct gwp_sockaddr *gs)
 {
 	static __thread char buf[8][FULL_ADDRSTRLEN];
@@ -531,6 +548,7 @@ static const char *ip_to_str(const struct gwp_sockaddr *gs)
 	return convert_ssaddr_to_str(bp, gs) ? NULL : bp;
 }
 
+__cold
 static int convert_str_to_ssaddr(const char *str, struct gwp_sockaddr *gs)
 {
 	static const struct addrinfo hints = {
@@ -590,6 +608,7 @@ static int convert_str_to_ssaddr(const char *str, struct gwp_sockaddr *gs)
 	return found ? 0 : -EINVAL;
 }
 
+__cold
 static int gwp_ctx_init_log(struct gwp_ctx *ctx)
 {
 	struct gwp_cfg *cfg = &ctx->cfg;
@@ -613,6 +632,7 @@ static int gwp_ctx_init_log(struct gwp_ctx *ctx)
 	return r;
 }
 
+__cold
 static void gwp_ctx_free_log(struct gwp_ctx *ctx)
 {
 	if (ctx->log_file &&
@@ -623,6 +643,7 @@ static void gwp_ctx_free_log(struct gwp_ctx *ctx)
 	}
 }
 
+__cold
 static int gwp_ctx_init_pid_file(struct gwp_ctx *ctx)
 {
 	FILE *f;
@@ -643,6 +664,7 @@ static int gwp_ctx_init_pid_file(struct gwp_ctx *ctx)
 	return 0;
 }
 
+__cold
 static int gwp_ctx_init_thread_sock(struct gwp_wrk *w,
 				    const struct gwp_sockaddr *ba)
 {
@@ -697,6 +719,7 @@ out_close:
 	return r;
 }
 
+__cold
 static void gwp_ctx_free_thread_sock(struct gwp_wrk *w)
 {
 	if (w->tcp_fd >= 0) {
@@ -707,6 +730,7 @@ static void gwp_ctx_free_thread_sock(struct gwp_wrk *w)
 	}
 }
 
+__cold
 static int gwp_ctx_init_thread_epoll(struct gwp_wrk *w)
 {
 	struct epoll_event ev, *events;
@@ -775,6 +799,7 @@ out_close_ep_fd:
 	return r;
 }
 
+__cold
 static void gwp_ctx_free_thread_epoll(struct gwp_wrk *w)
 {
 	if (w->ev_fd >= 0) {
@@ -795,6 +820,7 @@ static void gwp_ctx_free_thread_epoll(struct gwp_wrk *w)
 	w->events = NULL;
 }
 
+__cold
 static int gwp_ctx_init_thread(struct gwp_wrk *w,
 			       const struct gwp_sockaddr *bind_addr)
 {
@@ -832,6 +858,7 @@ static void log_conn_pair_close(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		ip_to_str(&gcp->target_addr));
 }
 
+__cold
 static void gwp_ctx_free_thread_sock_pairs(struct gwp_wrk *w)
 {
 	struct gwp_conn_slot *gcs = &w->conn_slot;
@@ -859,6 +886,7 @@ static void gwp_ctx_free_thread_sock_pairs(struct gwp_wrk *w)
 	gcs->cap = 0;
 }
 
+__cold
 static void gwp_ctx_free_thread(struct gwp_wrk *w)
 {
 	if (w->idx > 0)
@@ -868,6 +896,7 @@ static void gwp_ctx_free_thread(struct gwp_wrk *w)
 	gwp_ctx_free_thread_sock(w);
 }
 
+__cold
 static int gwp_ctx_init_threads(struct gwp_ctx *ctx)
 {
 	struct gwp_cfg *cfg = &ctx->cfg;
@@ -910,6 +939,7 @@ out_err:
 	return r;
 }
 
+__cold
 static void gwp_ctx_free_threads(struct gwp_ctx *ctx)
 {
 	struct gwp_wrk *workers = ctx->workers;
@@ -925,6 +955,7 @@ static void gwp_ctx_free_threads(struct gwp_ctx *ctx)
 	ctx->workers = NULL;
 }
 
+__hot
 static int resolve_domain(const char *host, const char *service,
 			  struct gwp_sockaddr *addr)
 {
@@ -955,6 +986,7 @@ static int resolve_domain(const char *host, const char *service,
 	return found ? 0 : -EHOSTUNREACH;
 }
 
+__hot
 static struct gwp_dns_query *gwp_gdns_push_query(const char host[256],
 						 const char port[6],
 						 struct gwp_dns *gdns)
@@ -1026,6 +1058,7 @@ static void gwp_gdns_free_query(struct gwp_dns_query *gdq)
 	free(gdq);
 }
 
+__hot
 static void gwp_gdns_put_query(struct gwp_dns_query *gdq)
 {
 	if (!gdq)
@@ -1035,6 +1068,7 @@ static void gwp_gdns_put_query(struct gwp_dns_query *gdq)
 		gwp_gdns_free_query(gdq);
 }
 
+__hot
 static void __gwp_gdns_reap_query(struct gwp_wrk_dns *wdns, struct gwp_ctx *ctx,
 				  struct gwp_dns *gdns)
 	__must_hold(&gdns->lock)
@@ -1072,6 +1106,7 @@ out_lock:
 	pthread_mutex_lock(&gdns->lock);
 }
 
+__hot
 static void __gwp_gdns_cond_wait(struct gwp_wrk_dns *wdns, struct gwp_ctx *ctx,
 				 struct gwp_dns *gdns)
 	__must_hold(&gdns->lock)
@@ -1088,6 +1123,8 @@ static void __gwp_gdns_cond_wait(struct gwp_wrk_dns *wdns, struct gwp_ctx *ctx,
 		gdns->nr_sleeping);
 }
 
+__hot
+noinline
 static void *gwp_ctx_dns_thread_entry(void *arg)
 {
 	struct gwp_wrk_dns *wdns = arg;
@@ -1307,6 +1344,7 @@ static char *trim_str(char *str)
 	return str;
 }
 
+__cold
 static int gwp_load_s5auth(struct gwp_ctx *ctx)
 {
 	const char *s5a_file = ctx->cfg.socks5_auth_file;
@@ -1339,6 +1377,7 @@ static int gwp_load_s5auth(struct gwp_ctx *ctx)
 	return 0;
 }
 
+__cold
 static int gwp_ctx_init_s5auth(struct gwp_ctx *ctx)
 {
 	const char *s5a_file = ctx->cfg.socks5_auth_file;
@@ -1408,6 +1447,7 @@ out_free_s5a:
 	return r;
 }
 
+__cold
 static void gwp_ctx_free_s5auth(struct gwp_ctx *ctx)
 {
 	struct gwp_socks5_auth *s5a = ctx->s5auth;
@@ -1423,6 +1463,7 @@ static void gwp_ctx_free_s5auth(struct gwp_ctx *ctx)
 	ctx->s5auth = NULL;
 }
 
+__cold
 static int gwp_ctx_init(struct gwp_ctx *ctx)
 {
 	int r;
@@ -1472,6 +1513,7 @@ out_free_log:
 	return r;
 }
 
+__cold
 static void gwp_ctx_signal_all_workers(struct gwp_ctx *ctx)
 {
 	int i;
@@ -1485,12 +1527,14 @@ static void gwp_ctx_signal_all_workers(struct gwp_ctx *ctx)
 	}
 }
 
+__cold
 static void gwp_ctx_stop(struct gwp_ctx *ctx)
 {
 	ctx->stop = true;
 	gwp_ctx_signal_all_workers(ctx);
 }
 
+__cold
 static void gwp_ctx_free(struct gwp_ctx *ctx)
 {
 	gwp_ctx_stop(ctx);
@@ -1500,6 +1544,7 @@ static void gwp_ctx_free(struct gwp_ctx *ctx)
 	gwp_ctx_free_log(ctx);
 }
 
+__cold
 static int init_conn(struct gwp_conn *conn, uint32_t buf_size)
 {
 	conn->fd = -1;
@@ -1526,6 +1571,7 @@ static void free_conn(struct gwp_conn *conn)
 	conn->ep_mask = 0;
 }
 
+__hot
 static struct gwp_conn_pair *alloc_conn_pair(struct gwp_wrk *w)
 {
 	struct gwp_conn_slot *gcs = &w->conn_slot;
@@ -1610,6 +1656,7 @@ static int rearm_accept(struct gwp_wrk *w, int nr_fd_closed)
 	return 0;
 }
 
+__hot
 static int free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct gwp_conn_slot *gcs = &w->conn_slot;
@@ -1716,6 +1763,7 @@ static void setup_sock_options(struct gwp_wrk *w, int fd)
 		setskopt_int(fd, IPPROTO_TCP, TCP_KEEPCNT, cfg->tcp_keepcnt);
 }
 
+__hot
 static int create_sock_target(struct gwp_wrk *w, struct gwp_sockaddr *addr,
 			      bool *is_target_alive)
 {
@@ -1745,6 +1793,7 @@ static int create_sock_target(struct gwp_wrk *w, struct gwp_sockaddr *addr,
 	return fd;
 }
 
+__hot
 static int create_timer(int fd, int sec, int nsec)
 {
 	const struct itimerspec its = {
@@ -1784,11 +1833,12 @@ static void log_conn_pair_created(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		ip_to_str(&gcp->client_addr), ip_to_str(&gcp->target_addr));
 }
 
+__hot
 static int handle_new_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct gwp_ctx *ctx = w->ctx;
 	struct gwp_cfg *cfg = &ctx->cfg;
-	int r, fd, timer_fd, timeout;
+	int fd, timer_fd, timeout;
 	struct epoll_event ev;
 	uint64_t cl_ev_bit;
 
@@ -1870,8 +1920,6 @@ static int handle_new_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 
 static int handle_accept_error(struct gwp_wrk *w, int e)
 {
-	int r;
-
 	if (likely(e == -EAGAIN || e == -EINTR))
 		return e;
 
@@ -1901,6 +1949,7 @@ static int handle_accept_error(struct gwp_wrk *w, int e)
 	return e;
 }
 
+__hot
 static int __handle_ev_accept(struct gwp_wrk *w)
 {
 	static const int flags = SOCK_NONBLOCK | SOCK_CLOEXEC;
@@ -1946,6 +1995,7 @@ out_err:
 	return r;
 }
 
+__hot
 static int handle_ev_accept(struct gwp_wrk *w, struct epoll_event *ev)
 {
 	static const uint32_t nr_loop = 32;
@@ -2016,6 +2066,7 @@ static bool adj_epl_in(struct gwp_conn *src)
 	return false;
 }
 
+__hot
 static int adjust_epl_mask(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	bool client_need_ctl = false;
@@ -2050,6 +2101,7 @@ static int adjust_epl_mask(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	return 0;
 }
 
+__hot
 static void gwp_conn_buf_advance(struct gwp_conn *conn, size_t len)
 {
 	conn->len -= len;
@@ -2057,6 +2109,7 @@ static void gwp_conn_buf_advance(struct gwp_conn *conn, size_t len)
 		memmove(conn->buf, conn->buf + len, conn->len);
 }
 
+__hot
 static ssize_t __do_recv(struct gwp_conn *src)
 {
 	ssize_t ret;
@@ -2083,6 +2136,7 @@ static ssize_t __do_recv(struct gwp_conn *src)
 	return ret;
 }
 
+__hot
 static ssize_t __do_send(struct gwp_conn *src, struct gwp_conn *dst)
 {
 	ssize_t ret;
@@ -2104,6 +2158,7 @@ static ssize_t __do_send(struct gwp_conn *src, struct gwp_conn *dst)
 	return ret;
 }
 
+__hot
 static int do_splice(struct gwp_conn *src, struct gwp_conn *dst, bool do_recv,
 		     bool do_send)
 {
@@ -2124,6 +2179,7 @@ static int do_splice(struct gwp_conn *src, struct gwp_conn *dst, bool do_recv,
 	return 0;
 }
 
+__hot
 static int gwp_conn_buf_append(struct gwp_conn *conn, const void *data,
 			       size_t len)
 {
@@ -2144,6 +2200,7 @@ static int gwp_conn_buf_append(struct gwp_conn *conn, const void *data,
 	return 0;
 }
 
+__hot
 static int prep_socks5_rep_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 				   int err)
 {
@@ -2222,6 +2279,7 @@ out:
 	return 0;
 }
 
+__hot
 static int prep_and_send_socks5_rep_connect(struct gwp_wrk *w,
 					    struct gwp_conn_pair *gcp,
 					    int err)
@@ -2240,6 +2298,7 @@ static int prep_and_send_socks5_rep_connect(struct gwp_wrk *w,
 	return 0;
 }
 
+__hot
 static int handle_ev_target_conn_result(struct gwp_wrk *w,
 					struct gwp_conn_pair *gcp)
 {
@@ -2297,6 +2356,7 @@ out_conn_err:
 	return r;
 }
 
+__hot
 static int handle_ev_target(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 			    struct epoll_event *ev)
 {
@@ -2330,6 +2390,7 @@ static int handle_ev_target(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	return adjust_epl_mask(w, gcp);
 }
 
+__hot
 static int handle_ev_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 			    struct epoll_event *ev)
 {
@@ -2358,6 +2419,7 @@ static int handle_ev_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	return adjust_epl_mask(w, gcp);
 }
 
+__hot
 static int handle_ev_timer(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct gwp_ctx *ctx = w->ctx;
@@ -2372,6 +2434,7 @@ static int handle_ev_timer(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	return -ETIMEDOUT;
 }
 
+__hot
 static int handle_socks5_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct epoll_event ev;
@@ -2514,6 +2577,7 @@ static int handle_socks5_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
  *      Compliant implementations MUST support GSSAPI and SHOULD support
  *      USERNAME/PASSWORD authentication methods.
  */
+__hot
 static int handle_ev_client_socks5_init(struct gwp_wrk *w,
 					struct gwp_conn_pair *gcp)
 {
@@ -2739,6 +2803,8 @@ static int handle_ev_client_socks5_init(struct gwp_wrk *w,
  */
 static int handle_ev_client_socks5_cmd_connect(struct gwp_wrk *w,
 					       struct gwp_conn_pair *gcp);
+
+__hot
 static int handle_ev_client_socks5_cmd(struct gwp_wrk *w,
 				       struct gwp_conn_pair *gcp)
 {
@@ -2774,6 +2840,7 @@ static int handle_ev_client_socks5_cmd(struct gwp_wrk *w,
 	return r;
 }
 
+__hot
 static int handle_socks5_connect_domain_async(struct gwp_wrk *w,
 					      struct gwp_conn_pair *gcp,
 					      const char *host,
@@ -2819,6 +2886,7 @@ static int prep_socks5_rep_err(struct gwp_conn_pair *gcp, uint8_t rep)
 	return gwp_conn_buf_append(&gcp->target, resp, resp_len);
 }
 
+__hot
 static int handle_socks5_domain_connect(struct gwp_wrk *w,
 					struct gwp_conn_pair *gcp,
 					const char *host,
@@ -2846,6 +2914,7 @@ static int handle_socks5_domain_connect(struct gwp_wrk *w,
 	}
 }
 
+__hot
 static int handle_ev_client_socks5_cmd_connect(struct gwp_wrk *w,
 					       struct gwp_conn_pair *gcp)
 {
@@ -2925,6 +2994,7 @@ static int handle_ev_client_socks5_cmd_connect(struct gwp_wrk *w,
 	return r ? r : handle_socks5_connect(w, gcp);
 }
 
+__hot
 static bool gwp_s5auth_authenticate(struct gwp_ctx *ctx,
 				    const char *u, uint32_t ulen,
 				    const char *p, uint32_t plen)
@@ -2987,6 +3057,7 @@ static bool gwp_s5auth_authenticate(struct gwp_ctx *ctx,
  *      `failure' (STATUS value other than X'00') status, it MUST close the
  *      connection.
  */
+__hot
 static int handle_ev_client_socks5_auth_userpass(struct gwp_wrk *w,
 						 struct gwp_conn_pair *gcp)
 {
@@ -3042,6 +3113,7 @@ static int handle_ev_client_socks5_auth_userpass(struct gwp_wrk *w,
 	return 0;
 }
 
+__hot
 static int handle_socks5_pollout(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct epoll_event ev;
@@ -3065,6 +3137,7 @@ static int handle_socks5_pollout(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	return -EAGAIN;
 }
 
+__hot
 static int handle_ev_client_socks5(struct gwp_wrk *w,
 				   struct gwp_conn_pair *gcp,
 				   struct epoll_event *ev)
@@ -3149,6 +3222,7 @@ static void log_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 		ip_to_str(&gcp->client_addr));
 }
 
+__hot
 static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct gwp_dns_query *gdq = gcp->gdq;
@@ -3295,6 +3369,7 @@ static int fish_events(struct gwp_wrk *w)
 	return r;
 }
 
+noinline
 static void *gwp_ctx_thread_entry(void *arg)
 {
 	struct gwp_wrk *w = arg;
@@ -3349,6 +3424,7 @@ static int gwp_ctx_run(struct gwp_ctx *ctx)
 
 static struct gwp_ctx *g_ctx = NULL;
 
+__cold
 static void sig_handler(int sig)
 {
 	if (g_ctx)
