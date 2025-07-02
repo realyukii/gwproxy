@@ -1413,7 +1413,7 @@ static struct gwp_dns_query *gwp_gdns_push_query(const char host[256],
 	if (!gdq)
 		return NULL;
 
-	fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+	fd = __sys_eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 	if (fd < 0) {
 		free(gdq);
 		return NULL;
