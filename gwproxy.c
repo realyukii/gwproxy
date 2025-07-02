@@ -3715,7 +3715,7 @@ static int handle_socks5_pollout(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	if (likely(!adj_epl_out(&gcp->target, &gcp->client)))
 		return 0;
 
-	pr_dbg(w->ctx, "Handling short send for client SOCKS5 connection");
+	pr_dbg(w->ctx, "Handling short send on client SOCKS5 data");
 	ev.events = gcp->client.ep_mask;
 	ev.data.u64 = 0;
 	ev.data.ptr = gcp;
