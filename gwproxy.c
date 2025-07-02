@@ -1533,12 +1533,15 @@ out:
 	gwp_gdns_put_query(gdq);
 }
 
-static void gwp_gdns_put_query_batch(struct gwp_dns_query *head)
+static void gwp_gdns_signal_and_put_query_batch(struct gwp_dns_query *head,
+						int err)
 {
 	struct gwp_dns_query *gdq, *next;
 
 	for (gdq = head; gdq; gdq = next) {
 		next = gdq->next;
+		gdq->res = err;
+		gwp_eventfd_write(gdq->ev_fd, 1);
 		gwp_gdns_put_query(gdq);
 	}
 }
@@ -1577,14 +1580,14 @@ static void gwp_gdns_handle_query_batch(struct gwp_wrk_dns *wdns,
 	reqs = malloc(nr_queries * sizeof(*reqs));
 	if (unlikely(!reqs)) {
 		pr_err(ctx, "Failed to allocate memory for DNS batch queries");
-		gwp_gdns_put_query_batch(head);
+		gwp_gdns_signal_and_put_query_batch(head, -ENOMEM);
 		goto out;
 	}
 
 	data = malloc(nr_queries * sizeof(*data));
 	if (unlikely(!data)) {
 		pr_err(ctx, "Failed to allocate memory for DNS batch queries");
-		gwp_gdns_put_query_batch(head);
+		gwp_gdns_signal_and_put_query_batch(head, -ENOMEM);
 		goto out_free_reqs;
 	}
 
