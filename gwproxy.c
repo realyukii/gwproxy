@@ -1482,42 +1482,205 @@ static void gwp_gdns_put_query(struct gwp_dns_query *gdq)
 		gwp_gdns_free_query(gdq);
 }
 
+static bool gwp_gdns_handle_put_early(struct gwp_wrk_dns *wdns,
+				      struct gwp_ctx *ctx,
+				      struct gwp_dns_query *gdq)
+{
+	/*
+	 * If the ref_count is 1, it means we hold the last
+	 * reference to the query, and it is safe to free it
+	 * immediately. The client that created the query will
+	 * not be waiting for the result, no need to resolve
+	 * the domain.
+	 */
+	if (atomic_load(&gdq->ref_count) == 1) {
+		pr_dbg(ctx, "DNS query put early (idx=%u, host=%s, service=%s)",
+			wdns->idx, gdq->host, gdq->service);
+		gwp_gdns_free_query(gdq);
+		return true;
+	}
+
+	return false;
+}
+
+static void gwp_gdns_store_result_and_put(struct gwp_dns_query *gdq,
+					  struct addrinfo *res)
+{
+	struct addrinfo *ai;
+	bool found = false;
+
+	if (unlikely(gdq->res))
+		goto out;
+
+	memset(&gdq->result, 0, sizeof(gdq->result));
+	for (ai = res; ai; ai = ai->ai_next) {
+		if (ai->ai_family == AF_INET) {
+			gdq->result.i4 = *(struct sockaddr_in *)ai->ai_addr;
+			found = true;
+			break;
+		} else if (ai->ai_family == AF_INET6) {
+			gdq->result.i6 = *(struct sockaddr_in6 *)ai->ai_addr;
+			found = true;
+			break;
+		}
+	}
+
+	if (!found)
+		gdq->res = -EHOSTUNREACH;
+
+out:
+	eventfd_write(gdq->ev_fd, 1);
+	gwp_gdns_put_query(gdq);
+}
+
+static void gwp_gdns_put_query_batch(struct gwp_dns_query *head)
+{
+	struct gwp_dns_query *gdq, *next;
+
+	for (gdq = head; gdq; gdq = next) {
+		next = gdq->next;
+		gwp_gdns_put_query(gdq);
+	}
+}
+
+static void gwp_gdns_handle_query_batch(struct gwp_wrk_dns *wdns,
+					struct gwp_ctx *ctx,
+					struct gwp_dns *gdns)
+	__releases(&gdns->lock)
+	__acquires(&gdns->lock)
+{
+	static const struct addrinfo hints = {
+		.ai_family = AF_UNSPEC,
+		.ai_socktype = SOCK_STREAM,
+	};
+	struct req_data {
+		struct gwp_dns_query *gdq;
+		struct gaicb req;
+	};
+	struct gwp_dns_query *gdq, *next, *prev, *head = gdns->head;
+	uint32_t nr_queries, nr_needed, i;
+	struct gaicb **reqs, *r;
+	struct req_data *data;
+	struct sigevent sev;
+
+	if (!head)
+		return;
+
+	nr_queries = gdns->nr_queries;
+	gdns->head = gdns->tail = NULL;
+	gdns->nr_queries = 0;
+	pthread_mutex_unlock(&gdns->lock);
+
+	pr_dbg(ctx, "DNS worker %u processing batch of queries (nr_queries=%u)",
+		wdns->idx, nr_queries);
+
+	reqs = malloc(nr_queries * sizeof(*reqs));
+	if (unlikely(!reqs)) {
+		pr_err(ctx, "Failed to allocate memory for DNS batch queries");
+		gwp_gdns_put_query_batch(head);
+		goto out;
+	}
+
+	data = malloc(nr_queries * sizeof(*data));
+	if (unlikely(!data)) {
+		pr_err(ctx, "Failed to allocate memory for DNS batch queries");
+		gwp_gdns_put_query_batch(head);
+		goto out_free_reqs;
+	}
+
+	nr_needed = 0;
+	for (gdq = head, prev = NULL; gdq; gdq = next) {
+		next = gdq->next;
+		if (gwp_gdns_handle_put_early(wdns, ctx, gdq))
+			continue;
+
+		data[nr_needed].gdq = gdq;
+		r = &data[nr_needed].req;
+		memset(r, 0, sizeof(*r));
+		r->ar_name = gdq->host;
+		r->ar_service = gdq->service;
+		r->ar_request = &hints;
+		r->ar_result = NULL;
+		reqs[nr_needed] = r;
+		nr_needed++;
+		pr_dbg(ctx,
+			"DNS worker %u added query to batch (idx=%u, host=%s, service=%s)",
+			wdns->idx, gdq->ev_fd, gdq->host, gdq->service);
+	}
+
+	if (!nr_needed) {
+		pr_dbg(ctx,
+			"DNS worker %u has no queries to process (nr_needed=%u, nr_queries=%u)",
+			wdns->idx, nr_needed, nr_queries);
+		goto out_free_data;
+	}
+
+	memset(&sev, 0, sizeof(sev));
+	sev.sigev_notify = SIGEV_NONE;
+	getaddrinfo_a(GAI_WAIT, reqs, nr_needed, &sev);
+
+	for (i = 0; i < nr_needed; i++) {
+		struct gwp_dns_query *gdq = data[i].gdq;
+		struct gaicb *gcb = &data[i].req;
+		int err = gai_error(reqs[i]);
+
+		gdq->res = err ? -EHOSTUNREACH : 0;
+		memset(&gdq->result, 0, sizeof(gdq->result));
+		gwp_gdns_store_result_and_put(gdq, gcb->ar_result);
+		if (gcb->ar_result)
+			freeaddrinfo(gcb->ar_result);
+	}
+	pr_dbg(ctx,
+		"DNS worker %u completed batch of queries (nr_needed=%u, nr_queries=%u)",
+		wdns->idx, nr_needed, nr_queries);
+
+out_free_data:
+	free(data);
+out_free_reqs:
+	free(reqs);
+out:
+	pthread_mutex_lock(&gdns->lock);
+}
+
+static void gwp_gdns_handle_query_single(struct gwp_wrk_dns *wdns,
+					 struct gwp_ctx *ctx,
+					 struct gwp_dns *gdns)
+	__releases(&gdns->lock)
+	__acquires(&gdns->lock)
+{
+	struct gwp_dns_query *gdq = __gwp_gdns_pop_query(gdns);
+	uint32_t nr_queries;
+
+	if (!gdq)
+		return;
+
+	if (gwp_gdns_handle_put_early(wdns, ctx, gdq))
+		return;
+
+	nr_queries = gdns->nr_queries;
+	pthread_mutex_unlock(&gdns->lock);
+
+	pr_dbg(ctx,
+		"DNS worker %u processing query "
+		"(idx=%u, host=%s, service=%s, nr_queries=%u, ev_fd=%d)",
+		wdns->idx, gdq->ev_fd, gdq->host, gdq->service,
+		nr_queries, gdq->ev_fd);
+	memset(&gdq->result, 0, sizeof(gdq->result));
+	gdq->res = resolve_domain(gdq->host, gdq->service, &gdq->result);
+	gwp_eventfd_write(gdq->ev_fd, 1);
+	gwp_gdns_put_query(gdq);
+	pthread_mutex_lock(&gdns->lock);
+}
+
 __hot
 static void __gwp_gdns_reap_query(struct gwp_wrk_dns *wdns, struct gwp_ctx *ctx,
 				  struct gwp_dns *gdns)
 	__must_hold(&gdns->lock)
 {
-	struct gwp_dns_query *gdq;
-
-	gdq = __gwp_gdns_pop_query(gdns);
-	if (!gdq)
-		return;
-
-	pr_dbg(ctx,
-		"DNS worker %u processing query (idx=%u, host=%s, service=%s, nr_queries=%u, ev_fd=%d)",
-		wdns->idx, gdq->ev_fd, gdq->host, gdq->service,
-		gdns->nr_queries, gdq->ev_fd);
-
-	pthread_mutex_unlock(&gdns->lock);
-
-	if (atomic_load(&gdq->ref_count) == 1) {
-		/*
-		 * The client closed the connection before the
-		 * DNS query is processed.
-		 */
-		pr_dbg(ctx, "DNS query put early (idx=%u, host=%s, service=%s)",
-			wdns->idx, gdq->host, gdq->service);
-		gwp_gdns_free_query(gdq);
-		goto out_lock;
-	}
-
-	memset(&gdq->result, 0, sizeof(gdq->result));
-	gdq->res = resolve_domain(gdq->host, gdq->service, &gdq->result);
-	gwp_eventfd_write(gdq->ev_fd, 1);
-	gwp_gdns_put_query(gdq);
-
-out_lock:
-	pthread_mutex_lock(&gdns->lock);
+	if ((gdns->nr_queries + 1) > gdns->nr_sleeping)
+		gwp_gdns_handle_query_batch(wdns, ctx, gdns);
+	else
+		gwp_gdns_handle_query_single(wdns, ctx, gdns);
 }
 
 __hot
