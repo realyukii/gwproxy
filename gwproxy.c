@@ -1402,6 +1402,45 @@ static void gwp_ctx_free_threads(struct gwp_ctx *ctx)
 	ctx->workers = NULL;
 }
 
+static bool iterate_addr_list(struct addrinfo *res, struct gwp_sockaddr *gs,
+			      bool prefer_ipv6)
+{
+	struct addrinfo *ai, *last_i4 = NULL;
+
+	if (prefer_ipv6) {
+		for (ai = res; ai; ai = ai->ai_next) {
+			if (ai->ai_family == AF_INET6) {
+				gs->i6 = *(struct sockaddr_in6 *)ai->ai_addr;
+				return true;
+			} else if (ai->ai_family == AF_INET) {
+				/* Save the last IPv4 address */
+				last_i4 = ai;
+			}
+		}
+
+		/*
+		 * We did not find any IPv6 address, fallback
+		 * to the last IPv4 address if available.
+		 */
+		if (last_i4) {
+			gs->i4 = *(struct sockaddr_in *)last_i4->ai_addr;
+			return true;
+		}
+	} else {
+		for (ai = res; ai; ai = ai->ai_next) {
+			if (ai->ai_family == AF_INET) {
+				gs->i4 = *(struct sockaddr_in *)ai->ai_addr;
+				return true;
+			} else if (ai->ai_family == AF_INET6) {
+				gs->i6 = *(struct sockaddr_in6 *)ai->ai_addr;
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 __hot
 static int resolve_domain(const char *host, const char *service,
 			  struct gwp_sockaddr *addr, bool prefer_ipv6)
@@ -1410,38 +1449,15 @@ static int resolve_domain(const char *host, const char *service,
 		.ai_family = AF_UNSPEC,
 		.ai_socktype = SOCK_STREAM,
 	};
-	struct addrinfo *res = NULL, *ai;
-	bool found = false;
+	struct addrinfo *res = NULL;
+	bool found;
 	int r;
 
 	r = getaddrinfo(host, service, &hints, &res);
 	if (r < 0 || !res)
 		return -EHOSTUNREACH;
 
-	if (prefer_ipv6) {
-		for (ai = res; ai; ai = ai->ai_next) {
-			if (ai->ai_family == AF_INET6) {
-				addr->i6 = *(struct sockaddr_in6 *)ai->ai_addr;
-				found = true;
-				break;
-			}
-		}
-	}
-
-	if (!found) {
-		for (ai = res; ai; ai = ai->ai_next) {
-			if (ai->ai_family == AF_INET) {
-				addr->i4 = *(struct sockaddr_in *)ai->ai_addr;
-				found = true;
-				break;
-			} else if (ai->ai_family == AF_INET6) {
-				addr->i6 = *(struct sockaddr_in6 *)ai->ai_addr;
-				found = true;
-				break;
-			}
-		}
-	}
-
+	found = iterate_addr_list(res, addr, prefer_ipv6);
 	freeaddrinfo(res);
 	return found ? 0 : -EHOSTUNREACH;
 }
@@ -1553,37 +1569,13 @@ static void gwp_gdns_store_result_and_put(struct gwp_dns_query *gdq,
 					  struct addrinfo *res,
 					  bool prefer_ipv6)
 {
-	struct addrinfo *ai;
 	bool found = false;
 
 	if (unlikely(gdq->res))
 		goto out;
 
 	memset(&gdq->result, 0, sizeof(gdq->result));
-	if (prefer_ipv6) {
-		for (ai = res; ai; ai = ai->ai_next) {
-			if (ai->ai_family == AF_INET6) {
-				gdq->result.i6 = *(struct sockaddr_in6 *)ai->ai_addr;
-				found = true;
-				break;
-			}
-		}
-	}
-
-	if (!found) {
-		for (ai = res; ai; ai = ai->ai_next) {
-			if (ai->ai_family == AF_INET) {
-				gdq->result.i4 = *(struct sockaddr_in *)ai->ai_addr;
-				found = true;
-				break;
-			} else if (ai->ai_family == AF_INET6) {
-				gdq->result.i6 = *(struct sockaddr_in6 *)ai->ai_addr;
-				found = true;
-				break;
-			}
-		}
-	}
-
+	found = iterate_addr_list(res, &gdq->result, prefer_ipv6);
 	if (!found)
 		gdq->res = -EHOSTUNREACH;
 
@@ -1786,7 +1778,7 @@ static void __gwp_gdns_cond_wait(struct gwp_wrk_dns *wdns, struct gwp_ctx *ctx,
 	pr_dbg(ctx, "DNS worker %u is waiting for queries (nr_sleeping=%u)",
 		wdns->idx, gdns->nr_sleeping);
 
-	if (cfg->socks5_dns_cache_secs) {
+	if (cfg->socks5_dns_cache_secs > 0) {
 		struct timespec ts;
 		clock_gettime(CLOCK_REALTIME, &ts);
 		ts.tv_sec += cfg->socks5_dns_cache_secs;
