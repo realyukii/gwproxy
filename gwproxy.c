@@ -2009,6 +2009,8 @@ static int gwp_ctx_init_s5auth(struct gwp_ctx *ctx)
 	ctx->s5auth = s5a;
 	r = gwp_load_s5auth(ctx);
 	if (r < 0) {
+		free(ctx->s5auth->users);
+		ctx->s5auth->users = NULL;
 		pr_err(ctx, "Failed to load SOCKS5 authentication: %s",
 		       strerror(-r));
 		goto out_close_ino_fd;
