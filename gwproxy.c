@@ -73,6 +73,7 @@ static const struct option long_opts[] = {
 	{ "bind",		required_argument,	NULL,	'b' },
 	{ "target",		required_argument,	NULL,	't' },
 	{ "as-socks5",		required_argument,	NULL,	'S' },
+	{ "socks5-prefer-ipv6",	required_argument,	NULL,	'Q' },
 	{ "socks5-timeout",	required_argument,	NULL,	'o' },
 	{ "socks5-auth-file",	required_argument,	NULL,	'A' },
 	{ "nr-workers",		required_argument,	NULL,	'w' },
@@ -97,6 +98,7 @@ struct gwp_cfg {
 	const char	*bind;
 	const char	*target;
 	bool		as_socks5;
+	bool		socks5_prefer_ipv6;
 	int		socks5_timeout;
 	const char	*socks5_auth_file;
 	int		nr_workers;
@@ -120,6 +122,7 @@ static const struct gwp_cfg default_opts = {
 	.bind			= "[::]:1080",
 	.target			= NULL,
 	.as_socks5		= false,
+	.socks5_prefer_ipv6	= false,
 	.socks5_timeout		= 10,
 	.socks5_auth_file	= NULL,
 	.nr_workers		= 4,
@@ -290,6 +293,7 @@ static void show_help(const char *app)
 	printf("  -b, --bind=addr:port            Bind to the specified address (default: %s)\n", default_opts.bind);
 	printf("  -t, --target=addr_port          Target address to connect to\n");
 	printf("  -S, --as-socks5=0|1             Run as a SOCKS5 proxy (default: %d)\n", default_opts.as_socks5);
+	printf("  -Q, --socks5-prefer-ipv6=0|1    Prefer IPv6 for SOCKS5 DNS queries (default: %d)\n", default_opts.socks5_prefer_ipv6);
 	printf("  -o, --socks5-timeout=sec        SOCKS5 auth timeout in seconds (default: %d)\n", default_opts.socks5_timeout);
 	printf("  -A, --socks5-auth-file=file     File containing username:password for SOCKS5 auth (default: no auth)\n");
 	printf("  -w, --nr-workers=nr             Number of worker threads (default: %d)\n", default_opts.nr_workers);
@@ -348,6 +352,9 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 			break;
 		case 'S':
 			cfg->as_socks5 = !!atoi(optarg);
+			break;
+		case 'Q':
+			cfg->socks5_prefer_ipv6 = !!atoi(optarg);
 			break;
 		case 'o':
 			cfg->socks5_timeout = atoi(optarg);
@@ -1371,7 +1378,7 @@ static void gwp_ctx_free_threads(struct gwp_ctx *ctx)
 
 __hot
 static int resolve_domain(const char *host, const char *service,
-			  struct gwp_sockaddr *addr)
+			  struct gwp_sockaddr *addr, bool prefer_ipv6)
 {
 	static const struct addrinfo hints = {
 		.ai_family = AF_UNSPEC,
@@ -1385,17 +1392,30 @@ static int resolve_domain(const char *host, const char *service,
 	if (r < 0 || !res)
 		return -EHOSTUNREACH;
 
-	for (ai = res; ai; ai = ai->ai_next) {
-		if (ai->ai_family == AF_INET) {
-			addr->i4 = *(struct sockaddr_in *)ai->ai_addr;
-			found = true;
-			break;
-		} else if (ai->ai_family == AF_INET6) {
-			addr->i6 = *(struct sockaddr_in6 *)ai->ai_addr;
-			found = true;
-			break;
+	if (prefer_ipv6) {
+		for (ai = res; ai; ai = ai->ai_next) {
+			if (ai->ai_family == AF_INET6) {
+				addr->i6 = *(struct sockaddr_in6 *)ai->ai_addr;
+				found = true;
+				break;
+			}
 		}
 	}
+
+	if (!found) {
+		for (ai = res; ai; ai = ai->ai_next) {
+			if (ai->ai_family == AF_INET) {
+				addr->i4 = *(struct sockaddr_in *)ai->ai_addr;
+				found = true;
+				break;
+			} else if (ai->ai_family == AF_INET6) {
+				addr->i6 = *(struct sockaddr_in6 *)ai->ai_addr;
+				found = true;
+				break;
+			}
+		}
+	}
+
 	freeaddrinfo(res);
 	return found ? 0 : -EHOSTUNREACH;
 }
@@ -1504,7 +1524,8 @@ static bool gwp_gdns_handle_put_early(struct gwp_wrk_dns *wdns,
 }
 
 static void gwp_gdns_store_result_and_put(struct gwp_dns_query *gdq,
-					  struct addrinfo *res)
+					  struct addrinfo *res,
+					  bool prefer_ipv6)
 {
 	struct addrinfo *ai;
 	bool found = false;
@@ -1513,15 +1534,27 @@ static void gwp_gdns_store_result_and_put(struct gwp_dns_query *gdq,
 		goto out;
 
 	memset(&gdq->result, 0, sizeof(gdq->result));
-	for (ai = res; ai; ai = ai->ai_next) {
-		if (ai->ai_family == AF_INET) {
-			gdq->result.i4 = *(struct sockaddr_in *)ai->ai_addr;
-			found = true;
-			break;
-		} else if (ai->ai_family == AF_INET6) {
-			gdq->result.i6 = *(struct sockaddr_in6 *)ai->ai_addr;
-			found = true;
-			break;
+	if (prefer_ipv6) {
+		for (ai = res; ai; ai = ai->ai_next) {
+			if (ai->ai_family == AF_INET6) {
+				gdq->result.i6 = *(struct sockaddr_in6 *)ai->ai_addr;
+				found = true;
+				break;
+			}
+		}
+	}
+
+	if (!found) {
+		for (ai = res; ai; ai = ai->ai_next) {
+			if (ai->ai_family == AF_INET) {
+				gdq->result.i4 = *(struct sockaddr_in *)ai->ai_addr;
+				found = true;
+				break;
+			} else if (ai->ai_family == AF_INET6) {
+				gdq->result.i6 = *(struct sockaddr_in6 *)ai->ai_addr;
+				found = true;
+				break;
+			}
 		}
 	}
 
@@ -1629,7 +1662,8 @@ static void gwp_gdns_handle_query_batch(struct gwp_wrk_dns *wdns,
 
 		gdq->res = err ? -EHOSTUNREACH : 0;
 		memset(&gdq->result, 0, sizeof(gdq->result));
-		gwp_gdns_store_result_and_put(gdq, gcb->ar_result);
+		gwp_gdns_store_result_and_put(gdq, gcb->ar_result, 
+					      wdns->ctx->cfg.socks5_prefer_ipv6);
 		if (gcb->ar_result)
 			freeaddrinfo(gcb->ar_result);
 	}
@@ -1669,7 +1703,8 @@ static void gwp_gdns_handle_query_single(struct gwp_wrk_dns *wdns,
 		wdns->idx, gdq->ev_fd, gdq->host, gdq->service,
 		nr_queries, gdq->ev_fd);
 	memset(&gdq->result, 0, sizeof(gdq->result));
-	gdq->res = resolve_domain(gdq->host, gdq->service, &gdq->result);
+	gdq->res = resolve_domain(gdq->host, gdq->service, &gdq->result,
+				  wdns->ctx->cfg.socks5_prefer_ipv6);
 	gwp_eventfd_write(gdq->ev_fd, 1);
 	gwp_gdns_put_query(gdq);
 	pthread_mutex_lock(&gdns->lock);
@@ -3501,7 +3536,8 @@ static int handle_socks5_domain_connect(struct gwp_wrk *w,
 		 * We don't have DNS resolver threads. We must
 		 * resolve the domain name synchronously here.
 		 */
-		return resolve_domain(host, pstr, &gcp->target_addr);
+		return resolve_domain(host, pstr, &gcp->target_addr,
+				      w->ctx->cfg.socks5_prefer_ipv6);
 	}
 }
 
