@@ -76,6 +76,7 @@ static const struct option long_opts[] = {
 	{ "socks5-prefer-ipv6",	required_argument,	NULL,	'Q' },
 	{ "socks5-timeout",	required_argument,	NULL,	'o' },
 	{ "socks5-auth-file",	required_argument,	NULL,	'A' },
+	{ "socks5-dns-cache-secs",	required_argument,	NULL,	'L' },
 	{ "nr-workers",		required_argument,	NULL,	'w' },
 	{ "nr-dns-workers",	required_argument,	NULL,	'W' },
 	{ "connect-timeout",	required_argument,	NULL,	'c' },
@@ -101,6 +102,7 @@ struct gwp_cfg {
 	bool		socks5_prefer_ipv6;
 	int		socks5_timeout;
 	const char	*socks5_auth_file;
+	int		socks5_dns_cache_secs;
 	int		nr_workers;
 	int		nr_dns_workers;
 	int		connect_timeout;
@@ -125,6 +127,7 @@ static const struct gwp_cfg default_opts = {
 	.socks5_prefer_ipv6	= false,
 	.socks5_timeout		= 10,
 	.socks5_auth_file	= NULL,
+	.socks5_dns_cache_secs	= 0,
 	.nr_workers		= 4,
 	.nr_dns_workers		= 4,
 	.connect_timeout	= 5,
@@ -256,6 +259,23 @@ struct gwp_dns {
 	uint32_t		nr_queries;
 };
 
+struct dns_cache_entry {
+	char		host[256];
+	uint8_t		version;
+	union {
+		uint8_t		ipv4[4];
+		uint8_t		ipv6[16];
+	};
+	time_t		created_at;
+};
+
+struct gwp_dns_cache {
+	struct dns_cache_entry	*entries;
+	size_t			nr;
+	size_t			cap;
+	pthread_rwlock_t	lock;
+};
+
 struct gwp_socks5_user {
 	char	*u, *p;
 	uint8_t	ulen, plen;
@@ -276,6 +296,7 @@ struct gwp_ctx {
 	struct gwp_wrk			*workers;
 	struct gwp_dns			*gdns;
 	struct gwp_socks5_auth		*s5auth;
+	struct gwp_dns_cache		*s5dns_cache;
 	struct gwp_sockaddr		target_addr;
 	struct gwp_cfg			cfg;
 	_Atomic(int32_t)		nr_fd_closed;
@@ -296,6 +317,8 @@ static void show_help(const char *app)
 	printf("  -Q, --socks5-prefer-ipv6=0|1    Prefer IPv6 for SOCKS5 DNS queries (default: %d)\n", default_opts.socks5_prefer_ipv6);
 	printf("  -o, --socks5-timeout=sec        SOCKS5 auth timeout in seconds (default: %d)\n", default_opts.socks5_timeout);
 	printf("  -A, --socks5-auth-file=file     File containing username:password for SOCKS5 auth (default: no auth)\n");
+	printf("  -L, --socks5-dns-cache-secs=sec SOCKS5 DNS cache duration in seconds (default: %d)\n", default_opts.socks5_dns_cache_secs);
+	printf("                                  Set to 0 or a negative number to disable DNS caching.\n");
 	printf("  -w, --nr-workers=nr             Number of worker threads (default: %d)\n", default_opts.nr_workers);
 	printf("  -W, --nr-dns-workers=nr         Number of DNS worker threads for SOCKS5 (default: %d)\n", default_opts.nr_dns_workers);
 	printf("  -c, --connect-timeout=sec       Connection to target timeout in seconds (default: %d)\n", default_opts.connect_timeout);
@@ -361,6 +384,9 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 			break;
 		case 'A':
 			cfg->socks5_auth_file = optarg;
+			break;
+		case 'L':
+			cfg->socks5_dns_cache_secs = atoi(optarg);
 			break;
 		case 'w':
 			cfg->nr_workers = atoi(optarg);
@@ -1721,21 +1747,64 @@ static void __gwp_gdns_reap_query(struct gwp_wrk_dns *wdns, struct gwp_ctx *ctx,
 		gwp_gdns_handle_query_single(wdns, ctx, gdns);
 }
 
+static void __gwp_ctx_s5dns_del_by_idx_if_expired(struct gwp_ctx *ctx,
+						  size_t idx, bool recheck);
+
+static void gwp_ctx_s5dns_scan_timeout(struct gwp_ctx *ctx)
+{
+	struct gwp_dns_cache *s5dc = ctx->s5dns_cache;
+	struct gwp_cfg *cfg = &ctx->cfg;
+	int timeout;
+	time_t now;
+	size_t i;
+
+	assert(s5dc);
+	assert(cfg->socks5_dns_cache_secs > 0);
+	if (!s5dc)
+		return;
+
+	pthread_rwlock_wrlock(&s5dc->lock);
+	now = time(NULL);
+	timeout = cfg->socks5_dns_cache_secs;
+	for (i = 0; i < s5dc->nr; i++) {
+		struct dns_cache_entry *e = &s5dc->entries[i];
+		if (e->created_at + timeout <= now)
+			__gwp_ctx_s5dns_del_by_idx_if_expired(ctx, i, false);
+	}
+	pthread_rwlock_unlock(&s5dc->lock);
+}
+
 __hot
 static void __gwp_gdns_cond_wait(struct gwp_wrk_dns *wdns, struct gwp_ctx *ctx,
 				 struct gwp_dns *gdns)
 	__must_hold(&gdns->lock)
 {
-	gdns->nr_sleeping++;
+	struct gwp_cfg *cfg = &ctx->cfg;
+	int r;
 
+	gdns->nr_sleeping++;
 	pr_dbg(ctx, "DNS worker %u is waiting for queries (nr_sleeping=%u)",
 		wdns->idx, gdns->nr_sleeping);
 
-	pthread_cond_wait(&gdns->cond, &gdns->lock);
-	gdns->nr_sleeping--;
+	if (cfg->socks5_dns_cache_secs) {
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_sec += cfg->socks5_dns_cache_secs;
+		r = pthread_cond_timedwait(&gdns->cond, &gdns->lock, &ts);
+	} else {
+		pthread_cond_wait(&gdns->cond, &gdns->lock);
+		r = 0;
+	}
 
+	gdns->nr_sleeping--;
 	pr_dbg(ctx, "DNS worker %u woke up (nr_sleeping=%u)", wdns->idx,
 		gdns->nr_sleeping);
+
+	if (r == ETIMEDOUT) {
+		pr_dbg(ctx, "DNS worker %u is scanning for expired DNS cache(s)",
+			wdns->idx);
+		gwp_ctx_s5dns_scan_timeout(ctx);
+	}
 }
 
 __hot
@@ -2081,6 +2150,243 @@ static void gwp_ctx_free_s5auth(struct gwp_ctx *ctx)
 	ctx->s5auth = NULL;
 }
 
+static const char *ipe_to_str(uint8_t ver, const void *addr)
+{
+	struct gwp_sockaddr gs;
+
+	memset(&gs, 0, sizeof(gs));
+	if (ver == 4) {
+		memcpy(&gs.i4.sin_addr, addr, 4);
+		gs.i4.sin_family = AF_INET;
+	} else {
+		memcpy(&gs.i6.sin6_addr, addr, 16);
+		gs.i6.sin6_family = AF_INET6;
+	}
+
+	return ip_to_str(&gs);
+}
+
+static void __gwp_ctx_s5dns_del_by_idx_if_expired(struct gwp_ctx *ctx,
+						  size_t idx, bool recheck)
+	__must_hold(&ctx->s5dns_cache->lock)
+{
+	struct gwp_dns_cache *s5dc = ctx->s5dns_cache;
+	int timeout = ctx->cfg.socks5_dns_cache_secs;
+	struct dns_cache_entry *e;
+	bool cap_changed = false;
+	size_t last_idx;
+	time_t now;
+
+	if (recheck) {
+		if (unlikely(idx >= s5dc->nr))
+			return;
+
+		now = time(NULL);
+		e = &s5dc->entries[idx];
+		if (e->created_at + timeout >= now)
+			return;
+	} else {
+		e = &s5dc->entries[idx];
+	}
+
+	pr_dbg(ctx, "SOCKS5 DNS cache entry for host '%s' expired (ipv%hhu=%s)",
+		e->host, e->version, ipe_to_str(e->version, &e->ipv6));
+	last_idx = s5dc->nr - 1;
+	if (idx != last_idx)
+		s5dc->entries[idx] = s5dc->entries[last_idx];
+
+	s5dc->nr--;
+	if (!s5dc->nr) {
+		free(s5dc->entries);
+		s5dc->entries = NULL;
+		s5dc->cap = 0;
+		cap_changed = true;
+	} else if (s5dc->cap - s5dc->nr >= 16) {
+		struct dns_cache_entry *new_ents;
+		size_t new_cap = s5dc->nr;
+
+		new_ents = realloc(s5dc->entries, new_cap * sizeof(*new_ents));
+		if (!new_ents)
+			return;
+		s5dc->entries = new_ents;
+		s5dc->cap = new_cap;
+		cap_changed = true;
+	}
+
+	if (cap_changed)
+		pr_dbg(ctx, "Decreased SOCKS5 DNS cache capacity to %zu", s5dc->cap);
+}
+
+static void gwp_ctx_s5dns_del_by_idx_if_expired(struct gwp_ctx *ctx,
+						size_t idx, bool recheck)
+{
+	struct gwp_dns_cache *s5dc = ctx->s5dns_cache;
+	pthread_rwlock_wrlock(&s5dc->lock);
+	__gwp_ctx_s5dns_del_by_idx_if_expired(ctx, idx, recheck);
+	pthread_rwlock_unlock(&s5dc->lock);
+}
+
+__hot
+static int gwp_ctx_s5dns_cache_lookup(struct gwp_ctx *ctx, const char *host,
+				      struct gwp_sockaddr *gs)
+{
+	int timeout = ctx->cfg.socks5_dns_cache_secs;
+	struct gwp_dns_cache *s5dc = ctx->s5dns_cache;
+	bool found = false, recheck = true;
+	struct dns_cache_entry *e = NULL;
+	time_t now;
+	int r = 0;
+	size_t i;
+
+	if (!s5dc)
+		return -ENOENT;
+
+	pthread_rwlock_rdlock(&s5dc->lock);
+	for (i = 0; i < s5dc->nr; i++) {
+		e = &s5dc->entries[i];
+		if (!strcmp(e->host, host)) {
+			found = true;
+			break;
+		}
+	}
+
+	if (!found) {
+		pr_dbg(ctx, "SOCKS5 DNS cache miss for host '%s'", host);
+		r = -ENOENT;
+		goto out;
+	}
+
+	now = time(NULL);
+	if (e->created_at + timeout < now) {
+		pr_dbg(ctx, "SOCKS5 DNS cache entry for host '%s' expired", host);
+		r = -ENOENT;
+		goto out_del;
+	}
+
+	/*
+	 * The port is not stored in the cache.
+	 */
+	if (e->version == 4) {
+		gs->i4.sin_family = AF_INET;
+		gs->i4.sin_port = 0;
+		memcpy(&gs->i4.sin_addr, &e->ipv4, sizeof(e->ipv4));
+	} else if (e->version == 6) {
+		gs->i6.sin6_family = AF_INET6;
+		gs->i6.sin6_port = 0;
+		memcpy(&gs->i6.sin6_addr, &e->ipv6, sizeof(e->ipv6));
+	} else {
+		assert(0 && "Invalid address family");
+		recheck = false;
+		r = -EINVAL;
+		goto out_del;
+	}
+
+	pr_dbg(ctx, "SOCKS5 DNS cache hit for host '%s' (ipv%hhu=%s)", host,
+		e->version, ipe_to_str(e->version, e->ipv6));
+	r = 0;
+out:
+	pthread_rwlock_unlock(&s5dc->lock);
+	return r;
+
+out_del:
+	pthread_rwlock_unlock(&s5dc->lock);
+	gwp_ctx_s5dns_del_by_idx_if_expired(ctx, i, recheck);
+	return r;
+}
+
+__hot
+static int gwp_ctx_s5dns_cache_insert(struct gwp_ctx *ctx, const char *host,
+				      uint8_t ver, const void *addr)
+{
+	struct gwp_dns_cache *s5dc = ctx->s5dns_cache;
+	struct dns_cache_entry *e;
+	int r = 0;
+	size_t l;
+
+	if (!s5dc)
+		return 0;
+
+	pthread_rwlock_wrlock(&s5dc->lock);
+	if (s5dc->nr >= s5dc->cap) {
+		size_t new_cap = s5dc->cap ? s5dc->cap * 2 : 16;
+		struct dns_cache_entry *new_ents;
+
+		new_ents = realloc(s5dc->entries, new_cap * sizeof(*new_ents));
+		if (unlikely(!new_ents)) {
+			r = -ENOMEM;
+			goto out_unlock;
+		}
+
+		s5dc->entries = new_ents;
+		s5dc->cap = new_cap;
+		pr_dbg(ctx, "Increased SOCKS5 DNS cache capacity to %zu", s5dc->cap);
+	}
+
+	e = &s5dc->entries[s5dc->nr];
+	l = sizeof(e->host) - 1;
+	strncpy(e->host, host, l);
+	e->host[l] = '\0';
+	e->version = ver;
+	e->created_at = time(NULL);
+	memset(&e->ipv6, 0, sizeof(e->ipv6));
+
+	if (ver == 4) {
+		memcpy(&e->ipv4, addr, 4);
+	} else if (ver == 6) {
+		memcpy(&e->ipv6, addr, 16);
+	} else {
+		assert(0 && "Invalid address family");
+		r = -EINVAL;
+		goto out_unlock;
+	}
+
+	s5dc->nr++;
+	pr_dbg(ctx, "SOCKS5 DNS cache added entry for host '%s' (ipv%u=%s)",
+		e->host, e->version, ipe_to_str(e->version, addr));
+out_unlock:
+	pthread_rwlock_unlock(&s5dc->lock);
+	return r;
+}
+
+__cold
+static int gwp_ctx_init_s5dns_cache(struct gwp_ctx *ctx)
+{
+	struct gwp_dns_cache *s5dc;
+	int r;
+
+	if (!ctx->cfg.as_socks5 || ctx->cfg.socks5_dns_cache_secs <= 0) {
+		ctx->s5dns_cache = NULL;
+		return 0;
+	}
+
+	s5dc = calloc(1, sizeof(*s5dc));
+	if (!s5dc)
+		return -ENOMEM;
+
+	r = pthread_rwlock_init(&s5dc->lock, NULL);
+	if (r) {
+		free(s5dc);
+		return -r;
+	}
+
+	ctx->s5dns_cache = s5dc;
+	return 0;
+}
+
+__cold
+static void gwp_ctx_free_s5dns_cache(struct gwp_ctx *ctx)
+{
+	struct gwp_dns_cache *s5dc = ctx->s5dns_cache;
+
+	if (!s5dc)
+		return;
+
+	pthread_rwlock_destroy(&s5dc->lock);
+	free(s5dc->entries);
+	free(s5dc);
+	ctx->s5dns_cache = NULL;
+}
+
 __cold
 static int gwp_ctx_init(struct gwp_ctx *ctx)
 {
@@ -2089,11 +2395,19 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 	r = gwp_ctx_init_log(ctx);
 	if (r < 0)
 		return r;
+
+	r = gwp_ctx_init_s5dns_cache(ctx);
+	if (r < 0) {
+		pr_err(ctx, "Failed to initialize SOCKS5 DNS: %s",
+			strerror(-r));
+		goto out_free_log;
+	}
+
 	r = gwp_ctx_init_s5auth(ctx);
 	if (r < 0) {
 		pr_err(ctx, "Failed to initialize SOCKS5 authentication: %s",
 			strerror(-r));
-		goto out_free_log;
+		goto out_free_s5dns_cache;
 	}
 
 	r = gwp_ctx_init_dns(ctx);
@@ -2122,6 +2436,8 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 	}
 
 	return 0;
+out_free_s5dns_cache:
+	gwp_ctx_free_s5dns_cache(ctx);
 out_free_dns:
 	gwp_ctx_free_dns(ctx);
 out_free_s5auth:
@@ -2159,6 +2475,7 @@ static void gwp_ctx_free(struct gwp_ctx *ctx)
 	gwp_ctx_free_threads(ctx);
 	gwp_ctx_free_dns(ctx);
 	gwp_ctx_free_s5auth(ctx);
+	gwp_ctx_free_s5dns_cache(ctx);
 	gwp_ctx_free_log(ctx);
 }
 
@@ -3512,6 +3829,29 @@ static int prep_socks5_rep_err(struct gwp_conn_pair *gcp, uint8_t rep)
 	return gwp_conn_buf_append(&gcp->target, resp, resp_len);
 }
 
+static int try_dns_cache_lookup(struct gwp_ctx *ctx, const char *host,
+				struct gwp_sockaddr *gs, uint16_t port)
+{
+	int r;
+
+	if (!ctx->s5dns_cache)
+		return -ENOENT;
+
+	memset(gs, 0, sizeof(*gs));
+	r = gwp_ctx_s5dns_cache_lookup(ctx, host, gs);
+	if (r)
+		return r;
+
+	if (gs->sa.sa_family == AF_INET)
+		gs->i4.sin_port = htons(port);
+	else if (gs->sa.sa_family == AF_INET6)
+		gs->i6.sin6_port = htons(port);
+	else
+		return -EAFNOSUPPORT;
+
+	return 0;
+}
+
 __hot
 static int handle_socks5_domain_connect(struct gwp_wrk *w,
 					struct gwp_conn_pair *gcp,
@@ -3520,6 +3860,9 @@ static int handle_socks5_domain_connect(struct gwp_wrk *w,
 {
 	struct gwp_ctx *ctx = w->ctx;
 	char pstr[6];
+
+	if (!try_dns_cache_lookup(ctx, host, &gcp->target_addr, port))
+		return 0;
 
 	snprintf(pstr, sizeof(pstr), "%hu", port);
 	pr_dbg(ctx, "Resolving %s:%s %shronously", host, pstr,
@@ -3851,6 +4194,32 @@ static void log_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 		ip_to_str(&gcp->client_addr));
 }
 
+static int handle_dns_cache_insert(struct gwp_wrk *w,
+				   const char *host,
+				   const struct gwp_sockaddr *gs)
+{
+	struct gwp_ctx *ctx = w->ctx;
+	const void *addr_ptr;
+	uint8_t ver;
+
+	if (!ctx->s5dns_cache)
+		return 0;
+
+	if (gs->sa.sa_family == AF_INET) {
+		addr_ptr = &gs->i4.sin_addr.s_addr;
+		ver = 4;
+	} else if (gs->sa.sa_family == AF_INET6) {
+		addr_ptr = &gs->i6.sin6_addr.s6_addr;
+		ver = 6;
+	} else {
+		pr_err(ctx, "Unsupported address family: %d", gs->sa.sa_family);
+		assert(0 && "Unsupported address family");
+		return -EINVAL;
+	}
+
+	return gwp_ctx_s5dns_cache_insert(ctx, host, ver, addr_ptr);
+}
+
 __hot
 static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
@@ -3872,7 +4241,9 @@ static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	log_dns_query(w, gcp, gdq);
 	if (likely(!gdq->res)) {
 		gcp->target_addr = gdq->result;
-		r = handle_socks5_connect(w, gcp);
+		r = handle_dns_cache_insert(w, gdq->host, &gcp->target_addr);
+		if (likely(!r))
+			r = handle_socks5_connect(w, gcp);
 	} else {
 		r = prep_and_send_socks5_rep_connect(w, gcp, gdq->res);
 	}
