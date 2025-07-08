@@ -3159,27 +3159,6 @@ static int do_splice(struct gwp_conn *src, struct gwp_conn *dst, bool do_recv,
 	return 0;
 }
 
-__hot
-static int gwp_conn_buf_append(struct gwp_conn *conn, const void *data,
-			       size_t len)
-{
-	if (unlikely(conn->len + len > conn->cap)) {
-		size_t new_cap = conn->cap + len + 1024;
-		char *new_buf;
-
-		new_buf = realloc(conn->buf, new_cap);
-		if (unlikely(!new_buf))
-			return -ENOMEM;
-
-		conn->buf = new_buf;
-		conn->cap = new_cap;
-	}
-
-	memcpy(conn->buf + conn->len, data, len);
-	conn->len += len;
-	return 0;
-}
-
 static int get_local_addr(struct gwp_ctx *ctx, int fd,
 			  struct gwp_socks5_addr *ba)
 {
