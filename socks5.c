@@ -939,6 +939,8 @@ static int __gwp_socks5_conn_cmd_connect_res(struct data_arg *arg,
 			memcpy(&resp[5 + resp[4]], &ba->port, 2);
 			resp_len += 1 + ba->domain.len + 2;
 			break;
+		default:
+			return -EINVAL;
 		}
 	} else {
 		resp[3] = GWP_SOCKS5_ATYP_IPV4; /* ATYP: IPv4 address */
