@@ -843,7 +843,8 @@ int gwp_socks5_conn_cmd_connect_res(struct gwp_socks5_ctx *ctx,
 	};
 	int r = __gwp_socks5_conn_cmd_connect_res(&arg, bind_addr, rep);
 	*out_len = arg.tot_out_len;
-	conn->state = rep == 0x00 ? GWP_SOCKS5_ST_FOWARDING : GWP_SOCKS5_ST_ERR;
+	conn->state = rep == 0x00 ? GWP_SOCKS5_ST_FORWARDING
+				  : GWP_SOCKS5_ST_ERR;
 	return r;
 }
 
@@ -953,7 +954,7 @@ static void test_connect_ipv4(void)
 	assert(!memcmp(&out[4], "\x7f\x00\x00\x01", 4));
 	/* BND.PORT */
 	assert(!memcmp(&out[8], "\xaa\xaa", 2));
-	assert(conn->state == GWP_SOCKS5_ST_FOWARDING);
+	assert(conn->state == GWP_SOCKS5_ST_FORWARDING);
 	assert(ctx->nr_clients == 1);
 
 	/*
@@ -1023,7 +1024,7 @@ static void test_connect_ipv6(void)
 	assert(!memcmp(&out[4], "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01", 16));
 	/* BND.PORT */
 	assert(!memcmp(&out[20], "\xaa\xaa", 2));
-	assert(conn->state == GWP_SOCKS5_ST_FOWARDING);
+	assert(conn->state == GWP_SOCKS5_ST_FORWARDING);
 	assert(ctx->nr_clients == 1);
 
 	/*
@@ -1089,7 +1090,7 @@ static int test_connect_domain(void)
 	assert(!memcmp(&out[4], "\x7f\x00\x00\x01", 4));
 	/* BND.PORT */
 	assert(!memcmp(&out[8], "\xaa\xaa", 2));
-	assert(conn->state == GWP_SOCKS5_ST_FOWARDING);
+	assert(conn->state == GWP_SOCKS5_ST_FORWARDING);
 	assert(ctx->nr_clients == 1);
 
 	/*
