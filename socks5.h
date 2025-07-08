@@ -159,7 +159,32 @@ int gwp_socks5_conn_handle_data(struct gwp_socks5_ctx *ctx,
 				const void *in_buf, size_t *in_len,
 				void *out_buf, size_t *out_len);
 
-
+/**
+ * Construct a response for a SOCKS5 CONNECT command. After the caller
+ * performs connect() and getsockname(), this function is called to
+ * prepare the response to send back to the client.
+ *
+ * If the connection was successful (rep == 0x00), the connection
+ * state is set to GWP_SOCKS5_ST_FORWARDING. Otherwise, it is set
+ * to GWP_SOCKS5_ST_ERR.
+ *
+ * @param ctx		The SOCKS5 context associated with the connection.
+ * @param conn		The SOCKS5 connection to handle data for.
+ * @param bind_addr	The local address to bind to (from getsockname()).
+ * @param rep		The SOCKS5 reply code.
+ * @param out_buf	Buffer to store the outgoing data.
+ * @param out_len	Pointer to the size of the outgoing data buffer.
+ * 			After return, it will contain the size of the data
+ * 			written to `out_buf` or the required size if there
+ * 			is not enough space.
+ * @return		0 on success, or a negative error code on failure.
+ *
+ * Error values:
+ * -EINVAL:	Invalid input parameters.
+ *
+ * -ENOBUFS:	Not enough space in the outgoing buffer. *out_len will
+ * 		contain the required size.
+ */
 int gwp_socks5_conn_cmd_connect_res(struct gwp_socks5_ctx *ctx,
 				    struct gwp_socks5_conn *conn,
 				    const struct gwp_socks5_addr *bind_addr,
