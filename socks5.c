@@ -1616,6 +1616,7 @@ static void gwp_socks5_run_tests(void)
 	}
 }
 
+__attribute__((__weak__))
 int main(void)
 {
 	gwp_socks5_run_tests();
