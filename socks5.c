@@ -22,9 +22,11 @@ static int copy_cfg(struct gwp_socks5_cfg *dst,
 	if (!src)
 		return 0;
 
-	dst->auth_file = strdup(src->auth_file);
-	if (!dst->auth_file)
-		return -ENOMEM;
+	if (src->auth_file && *src->auth_file) {
+		dst->auth_file = strdup(src->auth_file);
+		if (!dst->auth_file)
+			return -ENOMEM;
+	}
 
 	return 0;
 }

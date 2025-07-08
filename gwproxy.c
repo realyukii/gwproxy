@@ -38,6 +38,8 @@
 #include <sys/inotify.h>
 #include <sys/syscall.h>
 
+#include "socks5.h"
+
 #ifndef likely
 #define likely(x)	__builtin_expect(!!(x), 1)
 #endif
@@ -164,6 +166,7 @@ enum {
 enum {
 	CONN_STATE_INIT			= 101,
 
+	CONN_STATE_SOCKS5_DATA		= 100,
 	CONN_STATE_SOCKS5_MIN		= 200,
 	CONN_STATE_SOCKS5_INIT		= CONN_STATE_SOCKS5_MIN,
 	CONN_STATE_SOCKS5_AUTH_USERPASS	= 211,
@@ -201,6 +204,7 @@ struct gwp_conn_pair {
 	int			conn_state;
 	int			timer_fd;
 	uint32_t		idx;
+	struct gwp_socks5_conn	*s5_conn;
 	struct gwp_dns_query	*gdq;
 	struct gwp_sockaddr	client_addr;
 	struct gwp_sockaddr	target_addr;
@@ -298,6 +302,7 @@ struct gwp_ctx {
 	struct gwp_socks5_auth		*s5auth;
 	struct gwp_dns_cache		*s5dns_cache;
 	struct gwp_sockaddr		target_addr;
+	struct gwp_socks5_ctx		*socks5;
 	struct gwp_cfg			cfg;
 	_Atomic(int32_t)		nr_fd_closed;
 	_Atomic(int32_t)		nr_accept_stopped;
@@ -2379,6 +2384,40 @@ static void gwp_ctx_free_s5dns_cache(struct gwp_ctx *ctx)
 	ctx->s5dns_cache = NULL;
 }
 
+static int gwp_ctx_init_socks5(struct gwp_ctx *ctx)
+{
+	struct gwp_cfg *cfg = &ctx->cfg;
+	struct gwp_socks5_cfg s5cfg;
+	int r;
+
+	if (!cfg->as_socks5) {
+		ctx->socks5 = NULL;
+		return 0;
+	}
+
+	pr_dbg(ctx, "Initializing SOCKS5 context");
+	memset(&s5cfg, 0, sizeof(s5cfg));
+	s5cfg.auth_file = (char *)cfg->socks5_auth_file;
+	r = gwp_socks5_ctx_init(&ctx->socks5, &s5cfg);
+	if (r < 0) {
+		pr_err(ctx, "Failed to initialize SOCKS5 context: %s",
+			strerror(-r));
+		return r;
+	}
+
+	return 0;
+}
+
+static void gwp_ctx_free_socks5(struct gwp_ctx *ctx)
+{
+	if (!ctx->socks5)
+		return;
+
+	gwp_socks5_ctx_free(ctx->socks5);
+	ctx->socks5 = NULL;
+	pr_dbg(ctx, "SOCKS5 context freed");
+}
+
 __cold
 static int gwp_ctx_init(struct gwp_ctx *ctx)
 {
@@ -2420,14 +2459,20 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 	if (ctx->cfg.pid_file)
 		gwp_ctx_init_pid_file(ctx);
 
+	r = gwp_ctx_init_socks5(ctx);
+	if (r < 0)
+		goto out_free_dns;
+
 	r = gwp_ctx_init_threads(ctx);
 	if (r < 0) {
 		pr_err(ctx, "Failed to initialize worker threads: %s",
 			strerror(-r));
-		goto out_free_dns;
+		goto out_free_socks5;
 	}
 
 	return 0;
+out_free_socks5:
+	gwp_ctx_free_socks5(ctx);
 out_free_s5dns_cache:
 	gwp_ctx_free_s5dns_cache(ctx);
 out_free_dns:
@@ -2468,6 +2513,7 @@ static void gwp_ctx_free(struct gwp_ctx *ctx)
 	gwp_ctx_free_dns(ctx);
 	gwp_ctx_free_s5auth(ctx);
 	gwp_ctx_free_s5dns_cache(ctx);
+	gwp_ctx_free_socks5(ctx);
 	gwp_ctx_free_log(ctx);
 }
 
@@ -2777,9 +2823,12 @@ static int handle_new_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		 */
 		timeout = cfg->socks5_timeout;
 		fd = -1;
-		gcp->conn_state = CONN_STATE_SOCKS5_INIT;
+		gcp->conn_state = CONN_STATE_SOCKS5_DATA;
 		cl_ev_bit = EV_BIT_CLIENT_SOCKS5;
 		gcp->is_target_alive = false;
+		gcp->s5_conn = gwp_socks5_conn_alloc(ctx->socks5);
+		if (unlikely(!gcp->s5_conn))
+			return -ENOMEM;
 	} else {
 		fd = create_sock_target(w, &gcp->target_addr,
 					&gcp->is_target_alive);
@@ -2799,6 +2848,8 @@ static int handle_new_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 			pr_err(ctx, "Failed to create connect timeout timer: %s",
 				strerror(-timer_fd));
 			__sys_close(fd);
+			gwp_socks5_conn_free(ctx->socks5, gcp->s5_conn);
+			gcp->s5_conn = NULL;
 			return timer_fd;
 		}
 		gcp->timer_fd = timer_fd;
@@ -3134,82 +3185,56 @@ static int gwp_conn_buf_append(struct gwp_conn *conn, const void *data,
 	return 0;
 }
 
-__hot
-static int prep_socks5_rep_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
-				   int err)
+static int get_local_addr(struct gwp_ctx *ctx, int fd,
+			  struct gwp_socks5_addr *ba)
 {
-	struct gwp_sockaddr gs;
-	socklen_t l = sizeof(gs);
-	uint8_t tmp[128];
-	uint32_t len;
-	int r, f;
+	struct gwp_sockaddr t;
+	socklen_t len = sizeof(t);
+	int r;
 
-	tmp[0] = 0x05; /* VER */
-	switch (err) {
-	case 0:
-		tmp[1] = 0x00; /* REP: succeeded */
-		break;
-	case -ECONNREFUSED:
-		tmp[1] = 0x05; /* REP: Connection refused */
-		break;
-	case -ETIMEDOUT:
-		tmp[1] = 0x06; /* REP: TTL expired */
-		break;
-	case -ENETUNREACH:
-		tmp[1] = 0x03; /* REP: Network unreachable */
-		break;
-	case -EHOSTUNREACH:
-		tmp[1] = 0x04; /* REP: Host unreachable */
-		break;
-	case -EACCES:
-	case -EPERM:
-		tmp[1] = 0x02; /* REP: Connection not allowed by ruleset */
-		break;
-	default:
-		tmp[1] = 0x01; /* REP: General SOCKS server failure */
-		break;
-	}
-	tmp[2] = 0x00; /* RSV */
-	len = 4; /* VER + REP + RSV + ATYP */
-
-	if (err) {
-		tmp[3] = 0x01; /* ATYP: IPv4 address */
-		memset(&tmp[4], 0, 4);
-		memset(&tmp[8], 0, 2);
-		len += 4 + 2;
-		goto out;
-	}
-
-	memset(&gs, 0, sizeof(gs));
-	f = gcp->target.fd;
-	r = __sys_getsockname(f, &gs.sa, &l);
-	if (unlikely(r)) {
-		pr_err(w->ctx, "getsockname error (fd=%d): %s", f, strerror(-r));
+	r = __sys_getsockname(fd, &t.sa, &len);
+	if (r < 0) {
+		pr_err(ctx, "getsockname error: %s", strerror(-r));
 		return r;
 	}
 
-	f = gs.sa.sa_family;
-	if (likely(f == AF_INET)) {
-		tmp[3] = 0x01; /* ATYP: IPv4 address */
-		memcpy(&tmp[4], &gs.i4.sin_addr, 4);
-		memcpy(&tmp[8], &gs.i4.sin_port, 2);
-		len += 4 + 2;
-	} else if (likely(f == AF_INET6)) {
-		tmp[3] = 0x04; /* ATYP: IPv6 address */
-		memcpy(&tmp[4], &gs.i6.sin6_addr, 16);
-		memcpy(&tmp[20], &gs.i6.sin6_port, 2);
-		len += 16 + 2;
-	} else {
-		pr_err(w->ctx, "Unsupported address family: %d", f);
+	switch (t.sa.sa_family) {
+	case AF_INET:
+		ba->ver = GWP_SOCKS5_ATYP_IPV4;
+		memcpy(&ba->ip4, &t.i4.sin_addr, 4);
+		ba->port = ntohs(t.i4.sin_port);
+		return 0;
+	case AF_INET6:
+		ba->ver = GWP_SOCKS5_ATYP_IPV6;
+		memcpy(&ba->ip6, &t.i6.sin6_addr, 16);
+		ba->port = ntohs(t.i6.sin6_port);
+		return 0;
+	default:
+		pr_err(ctx, "Unsupported address family %d for local socket",
+			t.sa.sa_family);
 		return -EAFNOSUPPORT;
 	}
+}
 
-out:
-	if (gwp_conn_buf_append(&gcp->target, tmp, len))
-		return -ENOMEM;
-
-	gcp->conn_state = err ? CONN_STATE_SOCKS5_ERR : CONN_STATE_FORWARDING;
-	return 0;
+static int socks5_translate_err(int err)
+{
+	switch (err) {
+	case 0:
+		return GWP_SOCKS5_REP_SUCCESS;
+	case -EPERM:
+	case -EACCES:
+		return GWP_SOCKS5_REP_NOT_ALLOWED;
+	case -ENETUNREACH:
+		return GWP_SOCKS5_REP_NETWORK_UNREACHABLE;
+	case -EHOSTUNREACH:
+		return GWP_SOCKS5_REP_HOST_UNREACHABLE;
+	case -ECONNREFUSED:
+		return GWP_SOCKS5_REP_CONN_REFUSED;
+	case -ETIMEDOUT:
+		return GWP_SOCKS5_REP_TTL_EXPIRED;
+	default:
+		return GWP_SOCKS5_REP_FAILURE;
+	}
 }
 
 __hot
@@ -3217,13 +3242,31 @@ static int prep_and_send_socks5_rep_connect(struct gwp_wrk *w,
 					    struct gwp_conn_pair *gcp,
 					    int err)
 {
+	struct gwp_socks5_ctx *s5 = w->ctx->socks5;
+	struct gwp_socks5_conn *sc = gcp->s5_conn;
+	struct gwp_socks5_addr ba;
+	size_t out_len;
 	ssize_t sr;
+	void *out;
 	int r;
 
-	r = prep_socks5_rep_connect(w, gcp, err);
-	if (unlikely(r))
+	if (err == 0) {
+		r = get_local_addr(w->ctx, gcp->target.fd, &ba);
+		if (unlikely(r))
+			return r;
+	} else {
+		memset(&ba, 0, sizeof(ba));
+		ba.ver = GWP_SOCKS5_ATYP_IPV4;
+	}
+
+	err = socks5_translate_err(err);
+	out = gcp->target.buf + gcp->target.len;
+	out_len = gcp->target.cap - gcp->target.len;
+	r = gwp_socks5_conn_cmd_connect_res(s5, sc, &ba, err, out, &out_len);
+	if (r < 0)
 		return r;
 
+	gcp->target.len += out_len;
 	sr = __do_send(&gcp->target, &gcp->client);
 	if (unlikely(sr < 0))
 		return sr;
@@ -3264,12 +3307,14 @@ static int handle_ev_target_conn_result(struct gwp_wrk *w,
 		gcp->timer_fd = -1;
 	}
 
-	gcp->is_target_alive = true;
 	if (gcp->conn_state == CONN_STATE_SOCKS5_CMD_CONNECT) {
 		r = prep_and_send_socks5_rep_connect(w, gcp, 0);
 		if (r)
 			return r;
 	}
+
+	gcp->is_target_alive = true;
+	gcp->conn_state = CONN_STATE_FORWARDING;
 
 	if (gcp->client.len) {
 		sr = __do_send(&gcp->client, &gcp->target);
@@ -3294,8 +3339,6 @@ static int handle_ev_target(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 {
 	int r;
 
-	assert(gcp->conn_state == CONN_STATE_FORWARDING);
-
 	if (unlikely(ev->events & EPOLLERR)) {
 		pr_err(w->ctx, "EPOLLERR on target connection event");
 		return -ECONNRESET;
@@ -3304,6 +3347,7 @@ static int handle_ev_target(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	if (!gcp->is_target_alive)
 		return handle_ev_target_conn_result(w, gcp);
 
+	assert(gcp->conn_state == CONN_STATE_FORWARDING);
 	if (ev->events & EPOLLIN) {
 		r = do_splice(&gcp->target, &gcp->client, true, true);
 		if (r)
@@ -3364,6 +3408,126 @@ static int handle_ev_timer(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		ip_to_str(&gcp->client_addr), ip_to_str(&gcp->target_addr));
 
 	return -ETIMEDOUT;
+}
+
+__hot
+static int handle_socks5_connect_domain_async(struct gwp_wrk *w,
+					      struct gwp_conn_pair *gcp,
+					      const char *host,
+					      const char *port)
+{
+	struct gwp_dns *gdns = w->ctx->gdns;
+	struct gwp_dns_query *gdq;
+	struct epoll_event ev;
+	int r;
+
+	gdq = gwp_gdns_push_query(host, port, gdns);
+	if (unlikely(!gdq))
+		return -ENOMEM;
+
+	ev.events = EPOLLIN;
+	ev.data.u64 = 0;
+	ev.data.ptr = gcp;
+	ev.data.u64 |= EV_BIT_DNS_QUERY;
+	r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_ADD, gdq->ev_fd, &ev);
+	if (unlikely(r)) {
+		gwp_gdns_put_query(gdq);
+		return r;
+	}
+
+	gcp->conn_state = CONN_STATE_SOCKS5_DNS_QUERY;
+	gcp->gdq = gdq;
+	return -EINPROGRESS;
+}
+
+static int try_dns_cache_lookup(struct gwp_ctx *ctx, const char *host,
+				struct gwp_sockaddr *gs, uint16_t port)
+{
+	int r;
+
+	if (!ctx->s5dns_cache)
+		return -ENOENT;
+
+	memset(gs, 0, sizeof(*gs));
+	r = gwp_ctx_s5dns_cache_lookup(ctx, host, gs);
+	if (r)
+		return r;
+
+	if (gs->sa.sa_family == AF_INET)
+		gs->i4.sin_port = htons(port);
+	else if (gs->sa.sa_family == AF_INET6)
+		gs->i6.sin6_port = htons(port);
+	else
+		return -EAFNOSUPPORT;
+
+	return 0;
+}
+
+static int socks5_prepare_target_addr_domain(struct gwp_wrk *w,
+					     struct gwp_conn_pair *gcp)
+{
+	struct gwp_ctx *ctx = w->ctx;
+	struct gwp_socks5_addr *dst;
+	const char *host, *sn;
+	uint16_t port;
+	char pstr[6];
+
+	dst = &gcp->s5_conn->dst_addr;
+	port = ntohs(dst->port);
+	host = dst->domain.str;
+	if (!try_dns_cache_lookup(ctx, host, &gcp->target_addr, port))
+		return 0;
+
+	snprintf(pstr, sizeof(pstr), "%hu", port);
+	sn = ctx->gdns ? "async" : "sync";
+	pr_dbg(ctx, "Resolving %s:%s %shronously", host, pstr, sn);
+
+	if (ctx->gdns) {
+		/*
+		 * Good, we have DNS resolver threads.
+		 * Do it asynchronously.
+		 */
+		return handle_socks5_connect_domain_async(w, gcp, host, pstr);
+	} else {
+		/*
+		 * We don't have DNS resolver threads.
+		 * Do it synchronously.
+		 */
+		return resolve_domain(host, pstr, &gcp->target_addr,
+				      w->ctx->cfg.socks5_prefer_ipv6);
+	}
+
+	return 0;
+}
+
+static int socks5_prepare_target_addr(struct gwp_wrk *w,
+				      struct gwp_conn_pair *gcp)
+{
+	struct gwp_sockaddr *ta = &gcp->target_addr;
+	struct gwp_socks5_conn *sc = gcp->s5_conn;
+	struct gwp_socks5_addr *dst;
+
+	assert(sc);
+	assert(sc->state == GWP_SOCKS5_ST_CMD_CONNECT);
+
+	dst = &sc->dst_addr;
+	memset(ta, 0, sizeof(*ta));
+	switch (dst->ver) {
+	case GWP_SOCKS5_ATYP_IPV4:
+		memcpy(&ta->i4.sin_addr, &dst->ip4, 4);
+		ta->i4.sin_port = dst->port;
+		ta->i4.sin_family = AF_INET;
+		return 0;
+	case GWP_SOCKS5_ATYP_IPV6:
+		memcpy(&ta->i6.sin6_addr, &dst->ip6, 16);
+		ta->i6.sin6_port = dst->port;
+		ta->i6.sin6_family = AF_INET6;
+		return 0;
+	case GWP_SOCKS5_ATYP_DOMAIN:
+		return socks5_prepare_target_addr_domain(w, gcp);
+	}
+
+	return -ENOSYS;
 }
 
 __hot
@@ -3441,640 +3605,6 @@ static int handle_socks5_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	return 0;
 }
 
-/*
- *   Link: https://datatracker.ietf.org/doc/html/rfc1928#section-3
- *
- *   3.  Procedure for TCP-based clients
- *
- *      When a TCP-based client wishes to establish a connection to an object
- *      that is reachable only via a firewall (such determination is left up
- *      to the implementation), it must open a TCP connection to the
- *      appropriate SOCKS port on the SOCKS server system.  The SOCKS service
- *      is conventionally located on TCP port 1080.  If the connection
- *      request succeeds, the client enters a negotiation for the
- *      authentication method to be used, authenticates with the chosen
- *      method, then sends a relay request.  The SOCKS server evaluates the
- *      request, and either establishes the appropriate connection or denies
- *      it.
- *
- *      Unless otherwise noted, the decimal numbers appearing in packet-
- *      format diagrams represent the length of the corresponding field, in
- *      octets.  Where a given octet must take on a specific value, the
- *      syntax X'hh' is used to denote the value of the single octet in that
- *      field. When the word 'Variable' is used, it indicates that the
- *      corresponding field has a variable length defined either by an
- *      associated (one or two octet) length field, or by a data type field.
- *
- *      The client connects to the server, and sends a version
- *      identifier/method selection message:
- *
- *                      +----+----------+----------+
- *                      |VER | NMETHODS | METHODS  |
- *                      +----+----------+----------+
- *                      | 1  |    1     | 1 to 255 |
- *                      +----+----------+----------+
- *
- *      The VER field is set to X'05' for this version of the protocol.  The
- *      NMETHODS field contains the number of method identifier octets that
- *      appear in the METHODS field.
- *
- *      The server selects from one of the methods given in METHODS, and
- *      sends a METHOD selection message:
- *
- *                            +----+--------+
- *                            |VER | METHOD |
- *                            +----+--------+
- *                            | 1  |   1    |
- *                            +----+--------+
- *
- *      If the selected METHOD is X'FF', none of the methods listed by the
- *      client are acceptable, and the client MUST close the connection.
- *
- *      The values currently defined for METHOD are:
- *
- *             o  X'00' NO AUTHENTICATION REQUIRED
- *             o  X'01' GSSAPI
- *             o  X'02' USERNAME/PASSWORD
- *             o  X'03' to X'7F' IANA ASSIGNED
- *             o  X'80' to X'FE' RESERVED FOR PRIVATE METHODS
- *             o  X'FF' NO ACCEPTABLE METHODS
- *
- *      The client and server then enter a method-specific sub-negotiation.
- *
- *      Descriptions of the method-dependent sub-negotiations appear in
- *      separate memos.
- *
- *      Developers of new METHOD support for this protocol should contact
- *      IANA for a METHOD number.  The ASSIGNED NUMBERS document should be
- *      referred to for a current list of METHOD numbers and their
- *      corresponding protocols.
- *
- *      Compliant implementations MUST support GSSAPI and SHOULD support
- *      USERNAME/PASSWORD authentication methods.
- */
-__hot
-static int handle_ev_client_socks5_init(struct gwp_wrk *w,
-					struct gwp_conn_pair *gcp)
-{
-	uint8_t *buf = (uint8_t *)gcp->client.buf;
-	uint8_t resp[2], nmethods, exp_method;
-	size_t len = gcp->client.len;
-	int next_conn_state;
-	bool method_found;
-	uint32_t exp_len;
-
-	exp_len = 2; /* VER + NMETHODS */
-	if (unlikely(len < exp_len))
-		return -EAGAIN;
-
-	if (unlikely(buf[0] != 0x05))
-		return -EINVAL;
-
-	nmethods = buf[1];
-	exp_len += nmethods;
-	if (unlikely(len < exp_len))
-		return -EAGAIN;
-
-	if (w->ctx->s5auth) {
-		exp_method = 0x02; /* USERNAME/PASSWORD */
-		next_conn_state = CONN_STATE_SOCKS5_AUTH_USERPASS;
-	} else {
-		exp_method = 0x00; /* NO AUTHENTICATION REQUIRED */
-		next_conn_state = CONN_STATE_SOCKS5_CMD;
-	}
-
-	if (likely(nmethods > 0))
-		method_found = !!memchr(&buf[2], exp_method, nmethods);
-	else
-		method_found = false;
-
-	if (!method_found) {
-		next_conn_state = CONN_STATE_SOCKS5_ERR;
-		exp_method = 0xFF; /* NO ACCEPTABLE METHODS */
-	}
-
-	resp[0] = 0x05; /* VER */
-	resp[1] = exp_method; /* METHOD */
-	if (gwp_conn_buf_append(&gcp->target, resp, 2))
-		return -ENOMEM;
-
-	gcp->conn_state = next_conn_state;
-	gwp_conn_buf_advance(&gcp->client, exp_len);
-	return 0;
-}
-
-/*
- *   Link: https://datatracker.ietf.org/doc/html/rfc1928#section-4
- *
- *   4.  Requests
- *
- *      Once the method-dependent subnegotiation has completed, the client
- *      sends the request details.  If the negotiated method includes
- *      encapsulation for purposes of integrity checking and/or
- *      confidentiality, these requests MUST be encapsulated in the method-
- *      dependent encapsulation.
- *
- *      The SOCKS request is formed as follows:
- *
- *           +----+-----+-------+------+----------+----------+
- *           |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
- *           +----+-----+-------+------+----------+----------+
- *           | 1  |  1  | X'00' |  1   | Variable |    2     |
- *           +----+-----+-------+------+----------+----------+
- *
- *        Where:
- *
- *             o  VER    protocol version: X'05'
- *             o  CMD
- *                o  CONNECT X'01'
- *                o  BIND X'02'
- *                o  UDP ASSOCIATE X'03'
- *             o  RSV    RESERVED
- *             o  ATYP   address type of following address
- *                o  IP V4 address: X'01'
- *                o  DOMAINNAME: X'03'
- *                o  IP V6 address: X'04'
- *             o  DST.ADDR       desired destination address
- *             o  DST.PORT desired destination port in network octet
- *                order
- *
- *      The SOCKS server will typically evaluate the request based on source
- *      and destination addresses, and return one or more reply messages, as
- *      appropriate for the request type.
- *
- *
- *   5.  Addressing
- *
- *      In an address field (DST.ADDR, BND.ADDR), the ATYP field specifies
- *      the type of address contained within the field:
- *
- *             o  X'01'
- *
- *      the address is a version-4 IP address, with a length of 4 octets
- *
- *             o  X'03'
- *
- *      the address field contains a fully-qualified domain name.  The first
- *      octet of the address field contains the number of octets of name that
- *      follow, there is no terminating NUL octet.
- *
- *             o  X'04'
- *
- *      the address is a version-6 IP address, with a length of 16 octets.
- *
- *   6.  Replies
- *
- *      The SOCKS request information is sent by the client as soon as it has
- *      established a connection to the SOCKS server, and completed the
- *      authentication negotiations.  The server evaluates the request, and
- *      returns a reply formed as follows:
- *
- *           +----+-----+-------+------+----------+----------+
- *           |VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
- *           +----+-----+-------+------+----------+----------+
- *           | 1  |  1  | X'00' |  1   | Variable |    2     |
- *           +----+-----+-------+------+----------+----------+
- *
- *        Where:
- *
- *             o  VER    protocol version: X'05'
- *             o  REP    Reply field:
- *                o  X'00' succeeded
- *                o  X'01' general SOCKS server failure
- *                o  X'02' connection not allowed by ruleset
- *                o  X'03' Network unreachable
- *                o  X'04' Host unreachable
- *                o  X'05' Connection refused
- *                o  X'06' TTL expired
- *                o  X'07' Command not supported
- *                o  X'08' Address type not supported
- *                o  X'09' to X'FF' unassigned
- *             o  RSV    RESERVED
- *             o  ATYP   address type of following address
- *                o  IP V4 address: X'01'
- *                o  DOMAINNAME: X'03'
- *                o  IP V6 address: X'04'
- *             o  BND.ADDR       server bound address
- *             o  BND.PORT       server bound port in network octet order
- *
- *
- *      Fields marked RESERVED (RSV) must be set to X'00'.
- *
- *      If the chosen method includes encapsulation for purposes of
- *      authentication, integrity and/or confidentiality, the replies are
- *      encapsulated in the method-dependent encapsulation.
- *
- *   CONNECT
- *
- *      In the reply to a CONNECT, BND.PORT contains the port number that the
- *      server assigned to connect to the target host, while BND.ADDR
- *      contains the associated IP address.  The supplied BND.ADDR is often
- *      different from the IP address that the client uses to reach the SOCKS
- *      server, since such servers are often multi-homed.  It is expected
- *      that the SOCKS server will use DST.ADDR and DST.PORT, and the
- *      client-side source address and port in evaluating the CONNECT
- *      request.
- *
- *   BIND
- *
- *      The BIND request is used in protocols which require the client to
- *      accept connections from the server.  FTP is a well-known example,
- *      which uses the primary client-to-server connection for commands and
- *      status reports, but may use a server-to-client connection for
- *      transferring data on demand (e.g. LS, GET, PUT).
- *
- *      It is expected that the client side of an application protocol will
- *      use the BIND request only to establish secondary connections after a
- *      primary connection is established using CONNECT.  In is expected that
- *      a SOCKS server will use DST.ADDR and DST.PORT in evaluating the BIND
- *      request.
- *
- *      Two replies are sent from the SOCKS server to the client during a
- *      BIND operation.  The first is sent after the server creates and binds
- *      a new socket.  The BND.PORT field contains the port number that the
- *      SOCKS server assigned to listen for an incoming connection.  The
- *      BND.ADDR field contains the associated IP address.  The client will
- *      typically use these pieces of information to notify (via the primary
- *      or control connection) the application server of the rendezvous
- *      address.  The second reply occurs only after the anticipated incoming
- *      connection succeeds or fails.
- *
- *      In the second reply, the BND.PORT and BND.ADDR fields contain the
- *      address and port number of the connecting host.
- *
- *   UDP ASSOCIATE
- *
- *      The UDP ASSOCIATE request is used to establish an association within
- *      the UDP relay process to handle UDP datagrams.  The DST.ADDR and
- *      DST.PORT fields contain the address and port that the client expects
- *      to use to send UDP datagrams on for the association.  The server MAY
- *      use this information to limit access to the association.  If the
- *      client is not in possesion of the information at the time of the UDP
- *      ASSOCIATE, the client MUST use a port number and address of all
- *      zeros.
- *
- *      A UDP association terminates when the TCP connection that the UDP
- *      ASSOCIATE request arrived on terminates.
- *
- *      In the reply to a UDP ASSOCIATE request, the BND.PORT and BND.ADDR
- *      fields indicate the port number/address where the client MUST send
- *      UDP request messages to be relayed.
- *
- *   Reply Processing
- *
- *      When a reply (REP value other than X'00') indicates a failure, the
- *      SOCKS server MUST terminate the TCP connection shortly after sending
- *      the reply.  This must be no more than 10 seconds after detecting the
- *      condition that caused a failure.
- *
- *      If the reply code (REP value of X'00') indicates a success, and the
- *      request was either a BIND or a CONNECT, the client may now start
- *      passing data.  If the selected authentication method supports
- *      encapsulation for the purposes of integrity, authentication and/or
- *      confidentiality, the data are encapsulated using the method-dependent
- *      encapsulation.  Similarly, when data arrives at the SOCKS server for
- *      the client, the server MUST encapsulate the data as appropriate for
- *      the authentication method in use.
- */
-static int handle_ev_client_socks5_cmd_connect(struct gwp_wrk *w,
-					       struct gwp_conn_pair *gcp);
-
-__hot
-static int handle_ev_client_socks5_cmd(struct gwp_wrk *w,
-				       struct gwp_conn_pair *gcp)
-{
-	struct gwp_conn *c = &gcp->client;
-	uint8_t *buf = (uint8_t *)c->buf, cmd;
-	uint32_t len = c->len;
-	int r;
-
-	/* VER + CMD + RSV + ATYP */
-	if (unlikely(len < 4))
-		return -EAGAIN;
-
-	/* VER must be 0x05. */
-	if (unlikely(buf[0] != 0x05))
-		return -EINVAL;
-
-	/* RSV must be 0x00. */
-	if (unlikely(buf[2] != 0x00))
-		return -EINVAL;
-
-	cmd = buf[1];
-	switch (cmd) {
-	case 0x01: /* CONNECT */
-		r = handle_ev_client_socks5_cmd_connect(w, gcp);
-		break;
-	case 0x02: /* BIND */
-	case 0x03: /* UDP ASSOCIATE */
-	default:
-		gcp->conn_state = CONN_STATE_SOCKS5_ERR;
-		r = 0;
-	}
-
-	return r;
-}
-
-__hot
-static int handle_socks5_connect_domain_async(struct gwp_wrk *w,
-					      struct gwp_conn_pair *gcp,
-					      const char *host,
-					      const char *port)
-{
-	struct gwp_dns *gdns = w->ctx->gdns;
-	struct gwp_dns_query *gdq;
-	struct epoll_event ev;
-	int r;
-
-	gdq = gwp_gdns_push_query(host, port, gdns);
-	if (unlikely(!gdq))
-		return -ENOMEM;
-
-	ev.events = EPOLLIN;
-	ev.data.u64 = 0;
-	ev.data.ptr = gcp;
-	ev.data.u64 |= EV_BIT_DNS_QUERY;
-	r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_ADD, gdq->ev_fd, &ev);
-	if (unlikely(r)) {
-		gwp_gdns_put_query(gdq);
-		return r;
-	}
-
-	gcp->conn_state = CONN_STATE_SOCKS5_DNS_QUERY;
-	gcp->gdq = gdq;
-	return -EINPROGRESS;
-}
-
-static int prep_socks5_rep_err(struct gwp_conn_pair *gcp, uint8_t rep)
-{
-	uint32_t resp_len;
-	uint8_t resp[10];
-
-	gcp->conn_state = CONN_STATE_SOCKS5_ERR;
-	resp_len = 10; /* VER + REP + RSV + ATYP + BND.ADDR + BND.PORT */
-	resp[0] = 0x05; /* VER */
-	resp[1] = rep;  /* REP */
-	resp[2] = 0x00; /* RSV */
-	resp[3] = 0x01; /* ATYP: IPv4 */
-	memset(&resp[4], 0, 4); /* BND.ADDR */
-	memset(&resp[8], 0, 2); /* BND.PORT */
-	return gwp_conn_buf_append(&gcp->target, resp, resp_len);
-}
-
-static int try_dns_cache_lookup(struct gwp_ctx *ctx, const char *host,
-				struct gwp_sockaddr *gs, uint16_t port)
-{
-	int r;
-
-	if (!ctx->s5dns_cache)
-		return -ENOENT;
-
-	memset(gs, 0, sizeof(*gs));
-	r = gwp_ctx_s5dns_cache_lookup(ctx, host, gs);
-	if (r)
-		return r;
-
-	if (gs->sa.sa_family == AF_INET)
-		gs->i4.sin_port = htons(port);
-	else if (gs->sa.sa_family == AF_INET6)
-		gs->i6.sin6_port = htons(port);
-	else
-		return -EAFNOSUPPORT;
-
-	return 0;
-}
-
-__hot
-static int handle_socks5_domain_connect(struct gwp_wrk *w,
-					struct gwp_conn_pair *gcp,
-					const char *host,
-					uint16_t port)
-{
-	struct gwp_ctx *ctx = w->ctx;
-	char pstr[6];
-
-	if (!try_dns_cache_lookup(ctx, host, &gcp->target_addr, port))
-		return 0;
-
-	snprintf(pstr, sizeof(pstr), "%hu", port);
-	pr_dbg(ctx, "Resolving %s:%s %shronously", host, pstr,
-		ctx->gdns ? "async" : "sync");
-
-	if (ctx->gdns) {
-		/*
-		 * Good, we have DNS resolver threads. Let's
-		 * do it asynchronously.
-		 */
-		return handle_socks5_connect_domain_async(w, gcp, host, pstr);
-	} else {
-		/*
-		 * We don't have DNS resolver threads. We must
-		 * resolve the domain name synchronously here.
-		 */
-		return resolve_domain(host, pstr, &gcp->target_addr,
-				      w->ctx->cfg.socks5_prefer_ipv6);
-	}
-}
-
-__hot
-static int handle_ev_client_socks5_cmd_connect(struct gwp_wrk *w,
-					       struct gwp_conn_pair *gcp)
-{
-	struct gwp_sockaddr *gs = &gcp->target_addr;
-	struct gwp_conn *c = &gcp->client;
-	uint8_t *buf = (uint8_t *)c->buf, atyp, domlen;
-	uint32_t len = c->len, exp_len = 4;
-	const char *host;
-	uint16_t port;
-	int r;
-
-	atyp = buf[3];
-	if (unlikely(atyp != 0x01 && atyp != 0x03 && atyp != 0x04))
-		return -EINVAL;
-
-	switch (atyp) {
-	case 0x01:
-		/*
-		 * IPv4 address and port.
-		 */
-		exp_len += 4 + 2;
-		break;
-	case 0x04:
-		/*
-		 * IPv6 address and port.
-		 */
-		exp_len += 16 + 2;
-		break;
-	case 0x03:
-		/*
-		 * Domain name length + Domain name + Port.
-		 */
-		exp_len += 1;
-		if (unlikely(len < exp_len))
-			return -EAGAIN;
-		domlen = buf[4];
-		exp_len += domlen + 2;
-		break;
-	default:
-		/*
-		 * 0x08 = "Address type not supported".
-		 */
-		return prep_socks5_rep_err(gcp, 0x08);
-	}
-
-	if (unlikely(len < exp_len))
-		return -EAGAIN;
-
-	memset(gs, 0, sizeof(*gs));
-	r = 0;
-	switch (atyp) {
-	case 0x01:
-		gs->sa.sa_family = AF_INET;
-		memcpy(&gs->i4.sin_addr, &buf[4], 4);
-		memcpy(&gs->i4.sin_port, &buf[8], 2);
-		break;
-	case 0x04:
-		gs->sa.sa_family = AF_INET6;
-		memcpy(&gs->i6.sin6_addr, &buf[4], 16);
-		memcpy(&gs->i6.sin6_port, &buf[20], 2);
-		break;
-	case 0x03:
-		host = (const char *)&buf[5];
-		memcpy(&port, &buf[5 + domlen], 2);
-		port = ntohs(port);
-
-		/* Null-terminate the domain name */
-		buf[5 + domlen] = '\0';
-		r = handle_socks5_domain_connect(w, gcp, host, port);
-		break;
-	}
-
-	gwp_conn_buf_advance(c, exp_len);
-	if (r == -EINPROGRESS)
-		return 0;
-
-	return r ? r : handle_socks5_connect(w, gcp);
-}
-
-__hot
-static bool gwp_s5auth_authenticate(struct gwp_ctx *ctx,
-				    const char *u, uint32_t ulen,
-				    const char *p, uint32_t plen)
-{
-	struct gwp_socks5_auth *s5a = ctx->s5auth;
-	bool r = false;
-	size_t i;
-
-	pthread_rwlock_rdlock(&s5a->lock);
-	for (i = 0; i < s5a->nr; i++) {
-		struct gwp_socks5_user *ui = &s5a->users[i];
-		if (ui->ulen != ulen)
-			continue;
-		if (ui->plen != plen)
-			continue;
-		if (memcmp(ui->u, u, ulen))
-			continue;
-		if (ui->p && memcmp(ui->p, p, plen))
-			continue;
-		r = true;
-		break;
-	}
-	pthread_rwlock_unlock(&s5a->lock);
-	return r;
-}
-
-/*
- *    Link: https://datatracker.ietf.org/doc/html/rfc1929#section-2
- *
- *    2.  Initial negotiation
- *
- *      Once the SOCKS V5 server has started, and the client has selected the
- *      Username/Password Authentication protocol, the Username/Password
- *      subnegotiation begins.  This begins with the client producing a
- *      Username/Password request:
- *
- *              +----+------+----------+------+----------+
- *              |VER | ULEN |  UNAME   | PLEN |  PASSWD  |
- *              +----+------+----------+------+----------+
- *              | 1  |  1   | 1 to 255 |  1   | 1 to 255 |
- *              +----+------+----------+------+----------+
- *
- *      The VER field contains the current version of the subnegotiation,
- *      which is X'01'. The ULEN field contains the length of the UNAME field
- *      that follows. The UNAME field contains the username as known to the
- *      source operating system. The PLEN field contains the length of the
- *      PASSWD field that follows. The PASSWD field contains the password
- *      association with the given UNAME.
- *
- *      The server verifies the supplied UNAME and PASSWD, and sends the
- *      following response:
- *
- *                            +----+--------+
- *                            |VER | STATUS |
- *                            +----+--------+
- *                            | 1  |   1    |
- *                            +----+--------+
- *
- *      A STATUS field of X'00' indicates success. If the server returns a
- *      `failure' (STATUS value other than X'00') status, it MUST close the
- *      connection.
- */
-__hot
-static int handle_ev_client_socks5_auth_userpass(struct gwp_wrk *w,
-						 struct gwp_conn_pair *gcp)
-{
-	uint8_t *buf = (uint8_t *)gcp->client.buf, ulen, plen, resp[2];
-	uint32_t len = gcp->client.len, exp_len;
-	struct gwp_ctx *ctx = w->ctx;
-	char *u, *p;
-
-	exp_len = 2; /* VER + ULEN */
-	if (unlikely(len < exp_len))
-		return -EAGAIN;
-
-	/* VER must be 0x01. */
-	if (unlikely(buf[0] != 0x01))
-		return -EINVAL;
-
-	ulen = buf[1];
-	/* ULEN cannot be zero. */
-	if (unlikely(!ulen))
-		return -EINVAL;
-
-	exp_len += ulen;
-	if (unlikely(len < exp_len))
-		return -EAGAIN;
-
-	exp_len += 1; /* PLEN */
-	if (unlikely(len < exp_len))
-		return -EAGAIN;
-
-	plen = buf[2 + ulen];
-	exp_len += plen;
-	if (unlikely(len < exp_len))
-		return -EAGAIN;
-
-	u = (char *)&buf[2];
-	p = (char *)&buf[2 + ulen + 1];
-	resp[0] = 0x01; /* VER */
-	if (gwp_s5auth_authenticate(ctx, u, ulen, p, plen)) {
-		resp[1] = 0x00; /* STATUS: success */
-		gcp->conn_state = CONN_STATE_SOCKS5_CMD;
-	} else {
-		resp[1] = 0x01; /* STATUS: failure */
-		gcp->conn_state = CONN_STATE_SOCKS5_ERR;
-	}
-
-	if (gwp_conn_buf_append(&gcp->target, resp, 2))
-		return -ENOMEM;
-
-	pr_info(ctx, "SOCKS5 authentication for user '%.*s' %s",
-		ulen, u, (resp[1] == 0x00) ? "succeeded" : "failed");
-
-	gwp_conn_buf_advance(&gcp->client, exp_len);
-	return 0;
-}
-
 __hot
 static int handle_socks5_pollout(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
@@ -4101,22 +3631,54 @@ static int handle_socks5_pollout(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	return -EAGAIN;
 }
 
+static int handle_socks5_data(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	struct gwp_socks5_ctx *s5ctx = w->ctx->socks5;
+	struct gwp_socks5_conn *sc = gcp->s5_conn;
+	size_t out_len, in_len;
+	void *in, *out;
+	int r;
+
+	assert(sc);
+
+	in = gcp->client.buf;
+	in_len = gcp->client.len;
+	out = gcp->target.buf + gcp->target.len;
+	out_len = gcp->target.cap - gcp->target.len;
+	r = gwp_socks5_conn_handle_data(s5ctx, sc, in, &in_len, out, &out_len);
+	if (r)
+		return (r == -EAGAIN) ? 0 : r;
+
+	gwp_conn_buf_advance(&gcp->client, in_len);
+	gcp->target.len += out_len;
+
+	if (sc->state == GWP_SOCKS5_ST_CMD_CONNECT) {
+		r = socks5_prepare_target_addr(w, gcp);
+		if (r)
+			return (r == -EINPROGRESS) ? 0 : r;
+
+		r = handle_socks5_connect(w, gcp);
+	}
+
+	return r;
+}
+
 __hot
 static int handle_ev_client_socks5(struct gwp_wrk *w,
 				   struct gwp_conn_pair *gcp,
 				   struct epoll_event *ev)
 {
 	struct gwp_ctx *ctx = w->ctx;
-	int r = 0, s;
+	ssize_t sr;
+	int r = 0;
 
 	assert(ctx->cfg.as_socks5);
 
 	if (unlikely(ev->events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP))) {
-		pr_err(ctx, "(EPOLLERR|EPOLLHUP|EPOLLRDHUP) on client SOCKS5 event");
+		pr_info(ctx, "(EPOLLERR|EPOLLHUP|EPOLLRDHUP) on client SOCKS5 event");
 		return -ECONNRESET;
 	}
 
-repeat:
 	if (ev->events & EPOLLOUT) {
 		r = handle_socks5_pollout(w, gcp);
 		if (r)
@@ -4124,7 +3686,7 @@ repeat:
 	}
 
 	if (ev->events & EPOLLIN) {
-		ssize_t sr = __do_recv(&gcp->client);
+		sr = __do_recv(&gcp->client);
 
 		/*
 		 * sr == 0 is fine, but must be back to
@@ -4134,37 +3696,13 @@ repeat:
 			return sr;
 	}
 
-	s = gcp->conn_state;
-	assert(CONN_STATE_SOCKS5_MIN <= s && s <= CONN_STATE_SOCKS5_MAX);
-	if (unlikely(s == CONN_STATE_SOCKS5_ERR))
-		return -ECONNRESET;
-
-	if (!gcp->client.len)
-		return 0;
-
-	switch (s) {
-	case CONN_STATE_SOCKS5_INIT:
-		r = handle_ev_client_socks5_init(w, gcp);
-		break;
-	case CONN_STATE_SOCKS5_AUTH_USERPASS:
-		r = handle_ev_client_socks5_auth_userpass(w, gcp);
-		break;
-	case CONN_STATE_SOCKS5_CMD:
-		r = handle_ev_client_socks5_cmd(w, gcp);
-		break;
-	default:
-		pr_err(ctx, "Invalid SOCKS5 connection state: %d", s);
-		r = -EINVAL;
-		break;
+	r = handle_socks5_data(w, gcp);
+	if (gcp->target.len) {
+		r = handle_socks5_pollout(w, gcp);
+		if (r && r != -EAGAIN)
+			return r;
 	}
-
-	if (unlikely(r && r != -EAGAIN))
-		return r;
-
-	if (likely(gcp->target.len))
-		ev->events |= EPOLLOUT;
-
-	goto repeat;
+	return r;
 }
 
 static void log_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
