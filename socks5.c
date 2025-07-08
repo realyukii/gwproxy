@@ -1036,6 +1036,73 @@ static void test_connect_ipv6(void)
 	gwp_socks5_ctx_free(ctx);
 }
 
+static int test_connect_domain(void)
+{
+	static const uint8_t in[] = {
+		0x05, 0x01, 0x00, 0x03, /* VER, CMD, RSV, ATYP */
+		/* DST.ADDR: example.com */
+		0x0b, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm',
+		0x00, 0x50  /* DST.PORT: 80 */
+	};
+	static const struct gwp_socks5_addr bind_addr = {
+		.ver = GWP_SOCKS5_ATYP_IPV4,
+		.ip4 = { 0x7f, 0x00, 0x00, 0x01 },
+		.port = 0xaaaa
+	};
+	struct gwp_socks5_conn *conn;
+	struct gwp_socks5_ctx *ctx;
+	size_t in_len, out_len;
+	uint8_t out[4096];
+	int r;
+
+	test_socks5_init_ctx_no_auth(&ctx);
+	conn = test_socks5_alloc_conn(ctx);
+	test_socks5_do_handshake_no_auth(ctx, conn);
+	in_len = sizeof(in);
+	out_len = sizeof(out);
+	r = gwp_socks5_conn_handle_data(ctx, conn, in, &in_len, out, &out_len);
+	assert(!r);
+	assert(in_len == sizeof(in));
+	assert(out_len == 0);
+	assert(conn->state == GWP_SOCKS5_ST_CMD_CONNECT);
+	assert(conn->dst_addr.ver == GWP_SOCKS5_ATYP_DOMAIN);
+	assert(conn->dst_addr.domain.len == 11);
+	assert(!memcmp(conn->dst_addr.domain.str, "example.com", 11));
+	assert(!memcmp(&conn->dst_addr.port, "\x00\x50", 2));
+
+	/* Reply with connect success. */
+	out_len = sizeof(out);
+	r = gwp_socks5_conn_cmd_connect_res(ctx, conn, &bind_addr,
+					    GWP_SOCKS5_REP_SUCCESS, out,
+					    &out_len);
+	assert(!r);
+	assert(out_len == 10);
+	/* VER */
+	assert(out[0] == 0x05);
+	/* REP: succeeded */
+	assert(out[1] == 0x00);
+	/* RSV */
+	assert(out[2] == 0x00);
+	/* ATYP */
+	assert(out[3] == GWP_SOCKS5_ATYP_IPV4);
+	/* BND.ADDR */
+	assert(!memcmp(&out[4], "\x7f\x00\x00\x01", 4));
+	/* BND.PORT */
+	assert(!memcmp(&out[8], "\xaa\xaa", 2));
+	assert(conn->state == GWP_SOCKS5_ST_FOWARDING);
+	assert(ctx->nr_clients == 1);
+
+	/*
+	 * All good!
+	 *
+	 * In a real application, we would start forwarding data
+	 * between the client and the destination.
+	 */
+	gwp_socks5_conn_free(ctx, conn);
+	gwp_socks5_ctx_free(ctx);
+	return 0;
+}
+
 static void gwp_socks5_run_tests(void)
 {
 	size_t i;
@@ -1043,6 +1110,7 @@ static void gwp_socks5_run_tests(void)
 	for (i = 0; i < 5000; i++) {
 		test_connect_ipv4();
 		test_connect_ipv6();
+		test_connect_domain();
 	}
 }
 
