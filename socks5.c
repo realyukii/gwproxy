@@ -82,7 +82,9 @@ static void free_auth_entries(struct gwp_socks5_auth *auth)
 		free(auth->entries[i].u);
 
 	free(auth->entries);
-	memset(auth, 0, sizeof(*auth));
+	auth->entries = NULL;
+	auth->nr = 0;
+	auth->cap = 0;
 }
 
 static int add_auth_entry(struct gwp_socks5_auth *auth, const char *line,
@@ -136,6 +138,34 @@ out_free_u:
 	return -EINVAL;
 }
 
+bool gwp_socks5_auth_check(struct gwp_socks5_ctx *ctx, const char *u,
+			   size_t ulen, const char *p, size_t plen)
+{
+	struct gwp_socks5_auth *auth = ctx->auth;
+	bool ret = false;
+	size_t i;
+
+	if (!auth || !auth->entries)
+		return false;
+
+	pthread_rwlock_rdlock(&auth->lock);
+	for (i = 0; i < auth->nr; i++) {
+		const struct auth_entry *ae = &auth->entries[i];
+		if (ulen != ae->ulen)
+			continue;
+		if (plen != ae->plen)
+			continue;
+		if (memcmp(u, ae->u, ulen) != 0)
+			continue;
+		if (memcmp(p, ae->p, plen) != 0)
+			continue;
+		ret = true;
+		break;
+	}
+	pthread_rwlock_unlock(&auth->lock);
+	return ret;
+}
+
 int gwp_socks5_auth_reload(struct gwp_socks5_ctx *ctx)
 {
 	struct gwp_socks5_auth *auth = ctx->auth;
@@ -179,7 +209,7 @@ static int open_auth_file(struct gwp_socks5_ctx *ctx)
 		return 0;
 	}
 
-	auth = malloc(sizeof(*auth));
+	auth = calloc(1, sizeof(*auth));
 	if (!auth)
 		return -ENOMEM;
 
@@ -440,6 +470,100 @@ static int handle_state_init(struct data_arg *d)
 		return -ENOBUFS;
 
 	conn->state = next_state;
+	advance_in_buf(d, exp_len);
+	return 0;
+}
+
+/*
+ *    Link: https://datatracker.ietf.org/doc/html/rfc1929#section-2
+ *
+ *    2.  Initial negotiation
+ *
+ *      Once the SOCKS V5 server has started, and the client has selected the
+ *      Username/Password Authentication protocol, the Username/Password
+ *      subnegotiation begins.  This begins with the client producing a
+ *      Username/Password request:
+ *
+ *              +----+------+----------+------+----------+
+ *              |VER | ULEN |  UNAME   | PLEN |  PASSWD  |
+ *              +----+------+----------+------+----------+
+ *              | 1  |  1   | 1 to 255 |  1   | 1 to 255 |
+ *              +----+------+----------+------+----------+
+ *
+ *      The VER field contains the current version of the subnegotiation,
+ *      which is X'01'. The ULEN field contains the length of the UNAME field
+ *      that follows. The UNAME field contains the username as known to the
+ *      source operating system. The PLEN field contains the length of the
+ *      PASSWD field that follows. The PASSWD field contains the password
+ *      association with the given UNAME.
+ *
+ *      The server verifies the supplied UNAME and PASSWD, and sends the
+ *      following response:
+ *
+ *                            +----+--------+
+ *                            |VER | STATUS |
+ *                            +----+--------+
+ *                            | 1  |   1    |
+ *                            +----+--------+
+ *
+ *      A STATUS field of X'00' indicates success. If the server returns a
+ *      `failure' (STATUS value other than X'00') status, it MUST close the
+ *      connection.
+ */
+static int handle_state_auth_userpass(struct data_arg *d)
+{
+	const uint8_t *buf = (uint8_t *)d->in_buf;
+	size_t exp_len, ulen, plen;
+	size_t len = *d->in_len;
+	const char *u, *p;
+	uint8_t resp[2];
+
+	/* VER + ULEN */
+	exp_len = 2;
+	if (len < exp_len)
+		return -EAGAIN;
+
+	/* VER must be 0x01. */
+	if (buf[0] != 0x01)
+		return -EINVAL;
+
+	ulen = buf[1];
+	exp_len += ulen;
+	if (len < exp_len)
+		return -EAGAIN;
+
+	/* UNAME must be non-empty. */
+	if (ulen == 0)
+		return -EINVAL;
+
+	u = (const char *)&buf[2];
+
+	/* PLEN */
+	exp_len += 1;
+	if (len < exp_len)
+		return -EAGAIN;
+
+	plen = buf[exp_len - 1];
+	exp_len += plen;
+	if (len < exp_len)
+		return -EAGAIN;
+
+	p = plen ? (const char *)&buf[2 + ulen + 1] : NULL;
+
+	resp[0] = 0x01; /* VER */
+	if (gwp_socks5_auth_check(d->ctx, u, ulen, p, plen)) {
+		/* STATUS = 0x00 (success) */
+		resp[1] = 0x00;
+		d->conn->state = GWP_SOCKS5_ST_CMD;
+	} else {
+		/* STATUS = 0x01 (failure) */
+		resp[1] = 0x01;
+		d->conn->state = GWP_SOCKS5_ST_ERR;
+	}
+
+	if (append_out_buf(d, resp, sizeof(resp)))
+		return -ENOBUFS;
+
 	advance_in_buf(d, exp_len);
 	return 0;
 }
@@ -763,6 +887,9 @@ repeat:
 	switch (conn->state) {
 	case GWP_SOCKS5_ST_INIT:
 		r = handle_state_init(&arg);
+		break;
+	case GWP_SOCKS5_ST_AUTH_USERPASS:
+		r = handle_state_auth_userpass(&arg);
 		break;
 	case GWP_SOCKS5_ST_CMD:
 		r = handle_state_cmd(&arg);
@@ -1209,6 +1336,129 @@ static void test_short_recv(void)
 	gwp_socks5_ctx_free(ctx);
 }
 
+static ssize_t file_put_contents(const char *path, const char *data, size_t len)
+{
+	size_t fwr;
+	FILE *f;
+	int ret;
+
+	f = fopen(path, "wb");
+	if (!f)
+		return -errno;
+
+	fwr = fwrite(data, 1, len, f);
+	if (fwr < len)
+		ret = -EIO;
+	else
+		ret = (size_t)fwr;
+
+	fclose(f);
+	return ret;
+}
+
+static void test_auth_userpass(void)
+{
+	static const uint8_t in[] = {
+		0x05, 0x02, 0x01, 0x02,	/* VER, NMETHODS, {USER/PASS} */
+
+		0x01,			/* VER  */
+		0x04,			/* ULEN */
+		'u', 's', 'e', 'r',	/* UNAME */
+		0x04,			/* PLEN */
+		'p', 'a', 's', 's',	/* PASSWD */
+
+		0x05, 0x01, 0x00, 0x01, /* VER, CMD, RSV, ATYP */
+		0x7f, 0x00, 0x00, 0x01, /* DST.ADDR: 127.0.0.1 */
+		0x00, 0x50, /* DST.PORT: 80 */
+	};
+	static const char cred_data[] = "user:pass\n";
+	char cred_file[] = "/tmp/gwp_socks5_auth.XXXXXX";
+	struct gwp_socks5_conn *conn;
+	struct gwp_socks5_ctx *ctx;
+	struct gwp_socks5_cfg cfg;
+	size_t in_len, out_len;
+	const uint8_t *inb;
+	uint8_t out[4096];
+	ssize_t r;
+
+	r = file_put_contents(cred_file, cred_data, sizeof(cred_data) - 1);
+	assert(r == (ssize_t)(sizeof(cred_data) - 1));
+
+	cfg.auth_file = cred_file;
+	r = gwp_socks5_ctx_init(&ctx, &cfg);
+	assert(!r);
+	assert(ctx);
+	assert(!strcmp(ctx->cfg.auth_file, cred_file));
+	assert(ctx->nr_clients == 0);
+
+	conn = gwp_socks5_conn_alloc(ctx);
+	assert(conn);
+	assert(conn->state == GWP_SOCKS5_ST_INIT);
+	assert(conn->ctx == ctx);
+	assert(ctx->nr_clients == 1);
+
+	inb = in;
+	in_len = 4; /* VER, NMETHODS, {USER/PASS} */
+	out_len = sizeof(out);
+	r = gwp_socks5_conn_handle_data(ctx, conn, inb, &in_len, out, &out_len);
+	assert(!r);
+	assert(in_len == 4);
+	assert(out_len == 2);
+
+	/* VER, METHOD: USER/PASS */
+	assert(out[0] == 0x05);
+	assert(out[1] == 0x02);
+	assert(conn->state == GWP_SOCKS5_ST_AUTH_USERPASS);
+
+	inb += in_len;
+	in_len = 11; /* VER, ULEN, UNAME, PLEN, PASSWD */
+	out_len = sizeof(out);
+	r = gwp_socks5_conn_handle_data(ctx, conn, inb, &in_len, out, &out_len);
+	assert(!r);
+	assert(in_len == 11);
+	assert(out_len == 2);
+
+	/* VER, REP: succeeded */
+	assert(out[0] == 0x01);
+	assert(out[1] == 0x00);
+	assert(conn->state == GWP_SOCKS5_ST_CMD);
+	inb += in_len;
+	in_len = sizeof(in) - 15; /* Remaining data */
+	out_len = sizeof(out);
+	r = gwp_socks5_conn_handle_data(ctx, conn, inb, &in_len, out, &out_len);
+	assert(!r);
+	assert(in_len == (sizeof(in) - 15));
+	assert(out_len == 0);
+	assert(conn->state == GWP_SOCKS5_ST_CMD_CONNECT);
+	assert(conn->dst_addr.ver == GWP_SOCKS5_ATYP_IPV4);
+	assert(!memcmp(conn->dst_addr.ip4, "\x7f\x00\x00\x01", 4));
+	assert(!memcmp(&conn->dst_addr.port, "\x00\x50", 2));
+
+	/* Reply with connect success. */
+	out_len = sizeof(out);
+	r = gwp_socks5_conn_cmd_connect_res(ctx, conn, NULL,
+					    GWP_SOCKS5_REP_SUCCESS, out,
+					    &out_len);
+	assert(!r);
+	assert(out_len == 10);
+	/* VER */
+	assert(out[0] == 0x05);
+	/* REP: succeeded */
+	assert(out[1] == 0x00);
+	/* RSV */
+	assert(out[2] == 0x00);
+	/* ATYP: IPv4 address */
+	assert(out[3] == GWP_SOCKS5_ATYP_IPV4);
+	/* BND.ADDR */
+	assert(!memcmp(&out[4], "\x00\x00\x00", 4));
+	/* BND.PORT */
+	assert(!memcmp(&out[8], "\x00\x00", 2));
+	assert(conn->state == GWP_SOCKS5_ST_FORWARDING);
+	assert(ctx->nr_clients == 1);
+	gwp_socks5_conn_free(ctx, conn);
+	gwp_socks5_ctx_free(ctx);
+}
+
 static void gwp_socks5_run_tests(void)
 {
 	size_t i;
@@ -1218,6 +1468,7 @@ static void gwp_socks5_run_tests(void)
 		test_connect_ipv6();
 		test_connect_domain();
 		test_short_recv();
+		test_auth_userpass();
 	}
 }
 
