@@ -966,12 +966,84 @@ static void test_connect_ipv4(void)
 	gwp_socks5_ctx_free(ctx);
 }
 
+static void test_connect_ipv6(void)
+{
+	/* Test connect to ::1:80 */
+	static const uint8_t in[] = {
+		0x05, 0x01, 0x00, 0x04, /* VER, CMD, RSV, ATYP */
+		0x00, 0x00, 0x00, 0x00, /* DST.ADDR: ::1 */
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x01,
+		0x00, 0x50              /* DST.PORT: 80 */
+	};
+	static const struct gwp_socks5_addr bind_addr = {
+		.ver = GWP_SOCKS5_ATYP_IPV6,
+		.port = 0xaaaa,
+		.ip6 = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 }
+	};
+	struct gwp_socks5_conn *conn;
+	struct gwp_socks5_ctx *ctx;
+	size_t in_len, out_len;
+	uint8_t out[4096];
+	int r;
+
+	test_socks5_init_ctx_no_auth(&ctx);
+	conn = test_socks5_alloc_conn(ctx);
+	test_socks5_do_handshake_no_auth(ctx, conn);
+
+	in_len = sizeof(in);
+	out_len = sizeof(out);
+	r = gwp_socks5_conn_handle_data(ctx, conn, in, &in_len, out, &out_len);
+	assert(!r);
+	assert(in_len == sizeof(in));
+	assert(out_len == 0);
+	assert(conn->state == GWP_SOCKS5_ST_CMD_CONNECT);
+	assert(conn->dst_addr.ver == GWP_SOCKS5_ATYP_IPV6);
+	assert(!memcmp(conn->dst_addr.ip6, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01", 16));
+	assert(!memcmp(&conn->dst_addr.port, "\x00\x50", 2));
+
+	/* Reply with connect success. */
+	out_len = sizeof(out);
+	r = gwp_socks5_conn_cmd_connect_res(ctx, conn, &bind_addr,
+					    GWP_SOCKS5_REP_SUCCESS, out,
+					    &out_len);
+	assert(!r);
+	assert(out_len == 22);
+	/* VER */
+	assert(out[0] == 0x05);
+	/* REP: succeeded */
+	assert(out[1] == 0x00);
+	/* RSV */
+	assert(out[2] == 0x00);
+	/* ATYP: IPv6 address */
+	assert(out[3] == GWP_SOCKS5_ATYP_IPV6);
+	/* BND.ADDR */
+	assert(!memcmp(&out[4], "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01", 16));
+	/* BND.PORT: 80 */
+	assert(!memcmp(&out[20], "\xaa\xaa", 2));
+	assert(conn->state == GWP_SOCKS5_ST_FOWARDING);
+	assert(ctx->nr_clients == 1);
+
+	/*
+	 * All good!
+	 *
+	 * In a real application, we would start forwarding data
+	 * between the client and the destination.
+	 */
+	gwp_socks5_conn_free(ctx, conn);
+	gwp_socks5_ctx_free(ctx);
+}
+
 static void gwp_socks5_run_tests(void)
 {
 	size_t i;
 
-	for (i = 0; i < 5000; i++)
+	for (i = 0; i < 5000; i++) {
 		test_connect_ipv4();
+		test_connect_ipv6();
+	}
 }
 
 int main(void)
