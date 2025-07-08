@@ -951,7 +951,7 @@ static void test_connect_ipv4(void)
 	assert(out[3] == GWP_SOCKS5_ATYP_IPV4);
 	/* BND.ADDR */
 	assert(!memcmp(&out[4], "\x7f\x00\x00\x01", 4));
-	/* BND.PORT: 80 */
+	/* BND.PORT */
 	assert(!memcmp(&out[8], "\xaa\xaa", 2));
 	assert(conn->state == GWP_SOCKS5_ST_FOWARDING);
 	assert(ctx->nr_clients == 1);
@@ -1021,7 +1021,7 @@ static void test_connect_ipv6(void)
 	assert(out[3] == GWP_SOCKS5_ATYP_IPV6);
 	/* BND.ADDR */
 	assert(!memcmp(&out[4], "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01", 16));
-	/* BND.PORT: 80 */
+	/* BND.PORT */
 	assert(!memcmp(&out[20], "\xaa\xaa", 2));
 	assert(conn->state == GWP_SOCKS5_ST_FOWARDING);
 	assert(ctx->nr_clients == 1);
