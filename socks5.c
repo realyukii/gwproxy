@@ -979,8 +979,6 @@ int gwp_socks5_conn_cmd_connect_res(struct gwp_socks5_ctx *ctx,
 	return r;
 }
 
-#ifndef NDEBUG
-
 #define test_socks5_init_ctx_no_auth(CTX)		\
 do {							\
 	struct gwp_socks5_ctx **__ctx = (CTX);		\
@@ -1601,6 +1599,7 @@ static void test_invalid_command(void)
 	gwp_socks5_ctx_free(ctx);
 }
 
+__attribute__((__unused__))
 static void gwp_socks5_run_tests(void)
 {
 	size_t i;
@@ -1618,6 +1617,7 @@ static void gwp_socks5_run_tests(void)
 	}
 }
 
+#ifndef NDEBUG
 __attribute__((__weak__))
 int main(void)
 {
