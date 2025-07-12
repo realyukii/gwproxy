@@ -327,12 +327,11 @@ struct data_arg {
 
 static int append_out_buf(struct data_arg *d, const void *buf, size_t len)
 {
-	size_t new_len = d->tot_out_len + len;
 	size_t old_len = d->tot_out_len;
 	uint8_t *dst;
 
-	d->tot_out_len += new_len;
-	if (new_len > *d->out_len)
+	d->tot_out_len += len;
+	if (d->tot_out_len > *d->out_len)
 		return -ENOBUFS;
 
 	dst = (uint8_t *)d->out_buf + old_len;
@@ -878,7 +877,7 @@ int gwp_socks5_conn_handle_data(struct gwp_socks5_conn *conn,
 		.tot_out_len = 0,
 		.tot_advance = 0
 	};
-	int r;
+	int r, orig_state = conn->state;
 
 repeat:
 	switch (conn->state) {
@@ -901,8 +900,23 @@ repeat:
 	if (r && r != -EAGAIN && r != -ENOBUFS)
 		conn->state = GWP_SOCKS5_ST_ERR;
 
+	if (r == -ENOBUFS) {
+		/*
+		 * If we run out of output buffer space, don't change
+		 * the connection state as the caller may lose the
+		 * partially written data in the output buffer.
+		 *
+		 * The caller will eventually get the proper state
+		 * after it calls this function again with enough
+		 * output buffer space.
+		 */
+		conn->state = orig_state;
+		*in_len = 0;
+	} else {
+		*in_len = arg.tot_advance;
+	}
+
 	*out_len = arg.tot_out_len;
-	*in_len = arg.tot_advance;
 	return r;
 }
 
