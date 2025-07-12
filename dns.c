@@ -43,68 +43,67 @@ struct gwp_dns_ctx {
 };
 
 static bool iterate_addr_list(struct addrinfo *res, struct gwp_sockaddr *gs,
-			      uint32_t restyp)
+			      uint32_t rt)
 {
 	struct addrinfo *ai;
 
-	if (restyp == GWP_DNS_RESTYP_IPV4_ONLY) {
+	/*
+	 * Handle IPV4_ONLY and IPV6_ONLY cases together.
+	 */
+	if (rt == GWP_DNS_RESTYP_IPV4_ONLY ||
+	    rt == GWP_DNS_RESTYP_IPV6_ONLY) {
+		int fm = (rt == GWP_DNS_RESTYP_IPV4_ONLY) ? AF_INET : AF_INET6;
+
 		for (ai = res; ai; ai = ai->ai_next) {
-			if (ai->ai_family != AF_INET)
+			if (ai->ai_family != fm)
 				continue;
-			gs->i4 = *(struct sockaddr_in *)ai->ai_addr;
-			return true;
-		}
-		return false;
-	}
-	
-	if (restyp == GWP_DNS_RESTYP_IPV6_ONLY) {
-		for (ai = res; ai; ai = ai->ai_next) {
-			if (ai->ai_family != AF_INET6)
-				continue;
-			gs->i6 = *(struct sockaddr_in6 *)ai->ai_addr;
-			return true;
-		}
-		return false;
-	}
-
-	if (restyp == GWP_DNS_RESTYP_PREFER_IPV6) {
-		struct sockaddr_in *fi4 = NULL;
-
-		for (ai = res; ai; ai = ai->ai_next) {
-			if (ai->ai_family == AF_INET6) {
-				gs->i6 = *(struct sockaddr_in6 *)ai->ai_addr;
-				return true;
-			} else if (ai->ai_family == AF_INET) {
-				fi4 = (struct sockaddr_in *)ai->ai_addr;
-			}
-		}
-
-		if (fi4) {
-			gs->i4 = *fi4;
-			return true;
-		}
-		return false;
-	}
-
-	if (restyp == GWP_DNS_RESTYP_PREFER_IPV4) {
-		struct sockaddr_in6 *fi6 = NULL;
-
-		for (ai = res; ai; ai = ai->ai_next) {
-			if (ai->ai_family == AF_INET) {
+			if (fm == AF_INET)
 				gs->i4 = *(struct sockaddr_in *)ai->ai_addr;
-				return true;
-			} else if (ai->ai_family == AF_INET6) {
-				fi6 = (struct sockaddr_in6 *)ai->ai_addr;
-			}
-		}
-
-		if (fi6) {
-			gs->i6 = *fi6;
+			else
+				gs->i6 = *(struct sockaddr_in6 *)ai->ai_addr;
 			return true;
 		}
 		return false;
 	}
 
+	/*
+	 * Handle PREFER_IPV6 and PREFER_IPV4 cases together.
+	 */
+	if (rt == GWP_DNS_RESTYP_PREFER_IPV6 ||
+	    rt == GWP_DNS_RESTYP_PREFER_IPV4) {
+		int prm = (rt == GWP_DNS_RESTYP_PREFER_IPV6) ? AF_INET6
+							     : AF_INET;
+		int sec = (prm == AF_INET6) ? AF_INET : AF_INET6;
+		struct sockaddr *fallback = NULL;
+
+		for (ai = res; ai; ai = ai->ai_next) {
+			if (ai->ai_family != prm) {
+				if (ai->ai_family == sec && !fallback)
+					fallback = ai->ai_addr;
+				continue;
+			}
+
+			if (prm == AF_INET)
+				gs->i4 = *(struct sockaddr_in *)ai->ai_addr;
+			else
+				gs->i6 = *(struct sockaddr_in6 *)ai->ai_addr;
+			return true;
+		}
+
+		if (!fallback)
+			return false;
+
+		if (sec == AF_INET)
+			gs->i4 = *(struct sockaddr_in *)fallback;
+		else
+			gs->i6 = *(struct sockaddr_in6 *)fallback;
+
+		return true;
+	}
+
+	/*
+	 * Default case: first available address (IPv4 or IPv6).
+	 */
 	for (ai = res; ai; ai = ai->ai_next) {
 		if (ai->ai_family == AF_INET) {
 			gs->i4 = *(struct sockaddr_in *)ai->ai_addr;
