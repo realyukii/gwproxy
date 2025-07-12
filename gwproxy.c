@@ -2843,7 +2843,7 @@ static int handle_new_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 			pr_err(ctx, "Failed to create connect timeout timer: %s",
 				strerror(-timer_fd));
 			__sys_close(fd);
-			gwp_socks5_conn_free(ctx->socks5, gcp->s5_conn);
+			gwp_socks5_conn_free(gcp->s5_conn);
 			gcp->s5_conn = NULL;
 			return timer_fd;
 		}
@@ -3216,7 +3216,6 @@ static int prep_and_send_socks5_rep_connect(struct gwp_wrk *w,
 					    struct gwp_conn_pair *gcp,
 					    int err)
 {
-	struct gwp_socks5_ctx *s5 = w->ctx->socks5;
 	struct gwp_socks5_conn *sc = gcp->s5_conn;
 	struct gwp_socks5_addr ba;
 	size_t out_len;
@@ -3236,7 +3235,7 @@ static int prep_and_send_socks5_rep_connect(struct gwp_wrk *w,
 	err = socks5_translate_err(err);
 	out = gcp->target.buf + gcp->target.len;
 	out_len = gcp->target.cap - gcp->target.len;
-	r = gwp_socks5_conn_cmd_connect_res(s5, sc, &ba, err, out, &out_len);
+	r = gwp_socks5_conn_cmd_connect_res(sc, &ba, err, out, &out_len);
 	if (r < 0)
 		return r;
 
@@ -3607,7 +3606,6 @@ static int handle_socks5_pollout(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 
 static int handle_socks5_data(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
-	struct gwp_socks5_ctx *s5ctx = w->ctx->socks5;
 	struct gwp_socks5_conn *sc = gcp->s5_conn;
 	size_t out_len, in_len;
 	void *in, *out;
@@ -3619,7 +3617,7 @@ static int handle_socks5_data(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	in_len = gcp->client.len;
 	out = gcp->target.buf + gcp->target.len;
 	out_len = gcp->target.cap - gcp->target.len;
-	r = gwp_socks5_conn_handle_data(s5ctx, sc, in, &in_len, out, &out_len);
+	r = gwp_socks5_conn_handle_data(sc, in, &in_len, out, &out_len);
 	if (r)
 		return (r == -EAGAIN) ? 0 : r;
 
