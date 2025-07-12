@@ -1655,6 +1655,77 @@ static void test_multi_state_at_once(void)
 	gwp_socks5_ctx_free(ctx);
 }
 
+static void test_enobufs(void)
+{
+	static const uint8_t in[] = {
+		0x05, 0x01, 0x00, /* VER, NMETHODS, {NO AUTH} */
+
+		0x05, 0x01, 0x00, 0x01, /* VER, CMD, RSV, ATYP */
+		0x7f, 0x00, 0x00, 0x01, /* DST.ADDR: 127.0.0.1 */
+		0x00, 0x50              /* DST.PORT: 80 */
+	};
+	struct gwp_socks5_conn *conn;
+	struct gwp_socks5_ctx *ctx;
+	size_t in_len, out_len;
+	const uint8_t *inb = in;
+	uint8_t out[4096];
+	size_t i;
+	int r;
+
+	test_socks5_init_ctx_no_auth(&ctx);
+	conn = test_socks5_alloc_conn(ctx);
+
+	/*
+	 * Prepare authentication data.
+	 */
+	in_len = 3;
+	out_len = 1;
+	r = gwp_socks5_conn_handle_data(conn, inb, &in_len, out, &out_len);
+	assert(r == -ENOBUFS);
+	assert(in_len == 0);
+	assert(out_len == 2);
+
+	in_len = 3;
+	out_len = 2;
+	r = gwp_socks5_conn_handle_data(conn, inb, &in_len, out, &out_len);
+	assert(!r);
+	assert(in_len == 3);
+	assert(out_len == 2);
+	assert(out[0] == 0x05); /* VER */
+	assert(out[1] == 0x00); /* METHOD: NO AUTHENTICATION REQUIRED */
+	assert(conn->state == GWP_SOCKS5_ST_CMD);
+	inb += in_len;
+
+	/*
+	 * Prepare connect data.
+	 */
+	in_len = 10;
+	out_len = 0;
+	r = gwp_socks5_conn_handle_data(conn, inb, &in_len, out, &out_len);
+	assert(!r);
+	assert(in_len == 10);
+	assert(out_len == 0);
+	assert(conn->state == GWP_SOCKS5_ST_CMD_CONNECT);
+	assert(conn->dst_addr.ver == GWP_SOCKS5_ATYP_IPV4);
+	assert(!memcmp(conn->dst_addr.ip4, "\x7f\x00\x00\x01", 4));
+	assert(!memcmp(&conn->dst_addr.port, "\x00\x50", 2));
+
+	for (i = 0; i < 10; i++) {
+		out_len = i;
+		r = gwp_socks5_conn_cmd_connect_res(conn, NULL,
+						    GWP_SOCKS5_REP_SUCCESS, out,
+						    &out_len);
+		assert(r == -ENOBUFS);
+		assert(out_len == 10);
+		assert(conn->state == GWP_SOCKS5_ST_CMD_CONNECT);
+	}
+
+	assert(ctx->nr_clients == 1);
+	gwp_socks5_conn_free(conn);
+	assert(ctx->nr_clients == 0);
+	gwp_socks5_ctx_free(ctx);
+}
+
 __attribute__((__unused__))
 static void gwp_socks5_run_tests(void)
 {
@@ -1671,6 +1742,7 @@ static void gwp_socks5_run_tests(void)
 		test_invalid_connect_addr_type();
 		test_invalid_command();
 		test_multi_state_at_once();
+		test_enobufs();
 	}
 }
 
