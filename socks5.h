@@ -118,18 +118,15 @@ struct gwp_socks5_conn *gwp_socks5_conn_alloc(struct gwp_socks5_ctx *ctx);
 /**
  * Free the resources associated with a SOCKS5 connection.
  *
- * @param ctx	The SOCKS5 context associated with the connection.
  * @param conn	The SOCKS5 connection to free.
  */
-void gwp_socks5_conn_free(struct gwp_socks5_ctx *ctx,
-			  struct gwp_socks5_conn *conn);
+void gwp_socks5_conn_free(struct gwp_socks5_conn *conn);
 
 /**
  * Handle incoming data and prepare outgoing data for a SOCKS5 connection.
  * It processes the incoming data, updates the connection state, and fills
  * the outgoing buffer with the appropriate response.
- * 
- * @param ctx		The SOCKS5 context associated with the connection.
+ *
  * @param conn		The SOCKS5 connection to handle data for.
  * @param in_buf	Buffer containing incoming data.
  * @param in_len	Pointer to the size of the incoming data buffer.
@@ -154,8 +151,7 @@ void gwp_socks5_conn_free(struct gwp_socks5_ctx *ctx,
  * -ENOBUFS:	Not enough space in the outgoing buffer. *out_len will
  * 		contain the required size.
  */
-int gwp_socks5_conn_handle_data(struct gwp_socks5_ctx *ctx,
-				struct gwp_socks5_conn *conn,
+int gwp_socks5_conn_handle_data(struct gwp_socks5_conn *conn,
 				const void *in_buf, size_t *in_len,
 				void *out_buf, size_t *out_len);
 
@@ -168,7 +164,6 @@ int gwp_socks5_conn_handle_data(struct gwp_socks5_ctx *ctx,
  * state is set to GWP_SOCKS5_ST_FORWARDING. Otherwise, it is set
  * to GWP_SOCKS5_ST_ERR.
  *
- * @param ctx		The SOCKS5 context associated with the connection.
  * @param conn		The SOCKS5 connection to handle data for.
  * @param bind_addr	The local address to bind to (from getsockname()).
  * @param rep		The SOCKS5 reply code.
@@ -185,8 +180,7 @@ int gwp_socks5_conn_handle_data(struct gwp_socks5_ctx *ctx,
  * -ENOBUFS:	Not enough space in the outgoing buffer. *out_len will
  * 		contain the required size.
  */
-int gwp_socks5_conn_cmd_connect_res(struct gwp_socks5_ctx *ctx,
-				    struct gwp_socks5_conn *conn,
+int gwp_socks5_conn_cmd_connect_res(struct gwp_socks5_conn *conn,
 				    const struct gwp_socks5_addr *bind_addr,
 				    uint8_t rep, void *out_buf,
 				    size_t *out_len);

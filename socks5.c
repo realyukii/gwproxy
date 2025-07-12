@@ -304,14 +304,13 @@ struct gwp_socks5_conn *gwp_socks5_conn_alloc(struct gwp_socks5_ctx *ctx)
 	return conn;
 }
 
-void gwp_socks5_conn_free(struct gwp_socks5_ctx *ctx,
-			  struct gwp_socks5_conn *conn)
+void gwp_socks5_conn_free(struct gwp_socks5_conn *conn)
 {
-	if (!ctx || !conn)
+	if (!conn)
 		return;
 
+	conn->ctx->nr_clients--;
 	free(conn);
-	ctx->nr_clients--;
 }
 
 struct data_arg {
@@ -865,13 +864,12 @@ static int handle_cmd_connect(struct data_arg *d)
 	return 0;
 }
 
-int gwp_socks5_conn_handle_data(struct gwp_socks5_ctx *ctx,
-				struct gwp_socks5_conn *conn,
+int gwp_socks5_conn_handle_data(struct gwp_socks5_conn *conn,
 				const void *in_buf, size_t *in_len,
 				void *out_buf, size_t *out_len)
 {
 	struct data_arg arg = {
-		.ctx = ctx,
+		.ctx = conn->ctx,
 		.conn = conn,
 		.in_buf = in_buf,
 		.in_len = in_len,
@@ -956,14 +954,13 @@ static int __gwp_socks5_conn_cmd_connect_res(struct data_arg *arg,
 	return 0;
 }
 
-int gwp_socks5_conn_cmd_connect_res(struct gwp_socks5_ctx *ctx,
-				    struct gwp_socks5_conn *conn,
+int gwp_socks5_conn_cmd_connect_res(struct gwp_socks5_conn *conn,
 				    const struct gwp_socks5_addr *bind_addr,
 				    uint8_t rep, void *out_buf,
 				    size_t *out_len)
 {
 	struct data_arg arg = {
-		.ctx = ctx,
+		.ctx = conn->ctx,
 		.conn = conn,
 		.in_buf = NULL,
 		.in_len = NULL,
@@ -1008,7 +1005,6 @@ do {								\
 	static const uint8_t in[] = {				\
 		0x05, 0x01, 0x00 /* VER, NMETHODS, METHOD */	\
 	};							\
-	struct gwp_socks5_ctx *__ctx = (CTX);			\
 	struct gwp_socks5_conn *__conn = (CONN);		\
 	size_t in_len, out_len;					\
 	uint8_t out[10];					\
@@ -1016,7 +1012,7 @@ do {								\
 								\
 	in_len = sizeof(in);					\
 	out_len = sizeof(out);					\
-	r = gwp_socks5_conn_handle_data(__ctx, __conn, in,	\
+	r = gwp_socks5_conn_handle_data(__conn, in,		\
 					&in_len, out,		\
 					&out_len);		\
 	assert(!r);						\
@@ -1055,7 +1051,7 @@ static void test_connect_ipv4(void)
 
 	in_len = sizeof(in);
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_handle_data(ctx, conn, in, &in_len, out, &out_len);
+	r = gwp_socks5_conn_handle_data(conn, in, &in_len, out, &out_len);
 	assert(!r);
 	assert(in_len == sizeof(in));
 	assert(out_len == 0);
@@ -1066,7 +1062,7 @@ static void test_connect_ipv4(void)
 
 	/* Reply with connect success. */
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_cmd_connect_res(ctx, conn, &bind_addr,
+	r = gwp_socks5_conn_cmd_connect_res(conn, &bind_addr,
 					    GWP_SOCKS5_REP_SUCCESS, out,
 					    &out_len);
 	assert(!r);
@@ -1092,7 +1088,7 @@ static void test_connect_ipv4(void)
 	 * In a real application, we would start forwarding data
 	 * between the client and the destination.
 	 */
-	gwp_socks5_conn_free(ctx, conn);
+	gwp_socks5_conn_free(conn);
 	gwp_socks5_ctx_free(ctx);
 }
 
@@ -1125,7 +1121,7 @@ static void test_connect_ipv6(void)
 
 	in_len = sizeof(in);
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_handle_data(ctx, conn, in, &in_len, out, &out_len);
+	r = gwp_socks5_conn_handle_data(conn, in, &in_len, out, &out_len);
 	assert(!r);
 	assert(in_len == sizeof(in));
 	assert(out_len == 0);
@@ -1136,7 +1132,7 @@ static void test_connect_ipv6(void)
 
 	/* Reply with connect success. */
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_cmd_connect_res(ctx, conn, &bind_addr,
+	r = gwp_socks5_conn_cmd_connect_res(conn, &bind_addr,
 					    GWP_SOCKS5_REP_SUCCESS, out,
 					    &out_len);
 	assert(!r);
@@ -1162,7 +1158,7 @@ static void test_connect_ipv6(void)
 	 * In a real application, we would start forwarding data
 	 * between the client and the destination.
 	 */
-	gwp_socks5_conn_free(ctx, conn);
+	gwp_socks5_conn_free(conn);
 	gwp_socks5_ctx_free(ctx);
 }
 
@@ -1190,7 +1186,7 @@ static int test_connect_domain(void)
 	test_socks5_do_handshake_no_auth(ctx, conn);
 	in_len = sizeof(in);
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_handle_data(ctx, conn, in, &in_len, out, &out_len);
+	r = gwp_socks5_conn_handle_data(conn, in, &in_len, out, &out_len);
 	assert(!r);
 	assert(in_len == sizeof(in));
 	assert(out_len == 0);
@@ -1202,7 +1198,7 @@ static int test_connect_domain(void)
 
 	/* Reply with connect success. */
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_cmd_connect_res(ctx, conn, &bind_addr,
+	r = gwp_socks5_conn_cmd_connect_res(conn, &bind_addr,
 					    GWP_SOCKS5_REP_SUCCESS, out,
 					    &out_len);
 	assert(!r);
@@ -1228,7 +1224,7 @@ static int test_connect_domain(void)
 	 * In a real application, we would start forwarding data
 	 * between the client and the destination.
 	 */
-	gwp_socks5_conn_free(ctx, conn);
+	gwp_socks5_conn_free(conn);
 	gwp_socks5_ctx_free(ctx);
 	return 0;
 }
@@ -1272,7 +1268,7 @@ static void test_short_recv(void)
 	for (i = 0; i < 3; i++) {
 		in_len = i;
 		out_len = sizeof(out);
-		r = gwp_socks5_conn_handle_data(ctx, conn, inb, &in_len, out,
+		r = gwp_socks5_conn_handle_data(conn, inb, &in_len, out,
 						&out_len);
 		assert(r == -EAGAIN);
 		assert(in_len == 0);
@@ -1281,7 +1277,7 @@ static void test_short_recv(void)
 	}
 	in_len = 3;
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_handle_data(ctx, conn, inb, &in_len, out, &out_len);
+	r = gwp_socks5_conn_handle_data(conn, inb, &in_len, out, &out_len);
 	assert(!r);
 	assert(in_len == 3);
 	assert(out_len == 2);
@@ -1295,7 +1291,7 @@ static void test_short_recv(void)
 	for (i = 0; i < (sizeof(in) - 3); i++) {
 		in_len = i;
 		out_len = sizeof(out);
-		r = gwp_socks5_conn_handle_data(ctx, conn, inb, &in_len, out,
+		r = gwp_socks5_conn_handle_data(conn, inb, &in_len, out,
 						&out_len);
 		assert(r == -EAGAIN);
 		assert(in_len == 0);
@@ -1304,7 +1300,7 @@ static void test_short_recv(void)
 	}
 	out_len = sizeof(out);
 	in_len = sizeof(in) - 3;
-	r = gwp_socks5_conn_handle_data(ctx, conn, inb, &in_len, out, &out_len);
+	r = gwp_socks5_conn_handle_data(conn, inb, &in_len, out, &out_len);
 	assert(!r);
 	assert(in_len == (sizeof(in) - 3));
 	assert(out_len == 0);
@@ -1315,7 +1311,7 @@ static void test_short_recv(void)
 
 	/* Reply with connect success. */
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_cmd_connect_res(ctx, conn, &bind_addr,
+	r = gwp_socks5_conn_cmd_connect_res(conn, &bind_addr,
 					    GWP_SOCKS5_REP_SUCCESS, out,
 					    &out_len);
 	assert(!r);
@@ -1334,7 +1330,7 @@ static void test_short_recv(void)
 	assert(!memcmp(&out[8], "\xaa\xaa", 2));
 	assert(conn->state == GWP_SOCKS5_ST_FORWARDING);
 	assert(ctx->nr_clients == 1);
-	gwp_socks5_conn_free(ctx, conn);
+	gwp_socks5_conn_free(conn);
 	gwp_socks5_ctx_free(ctx);
 }
 
@@ -1402,7 +1398,7 @@ static void test_auth_userpass(void)
 	inb = in;
 	in_len = 4; /* VER, NMETHODS, {USER/PASS} */
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_handle_data(ctx, conn, inb, &in_len, out, &out_len);
+	r = gwp_socks5_conn_handle_data(conn, inb, &in_len, out, &out_len);
 	assert(!r);
 	assert(in_len == 4);
 	assert(out_len == 2);
@@ -1415,7 +1411,7 @@ static void test_auth_userpass(void)
 	inb += in_len;
 	in_len = 11; /* VER, ULEN, UNAME, PLEN, PASSWD */
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_handle_data(ctx, conn, inb, &in_len, out, &out_len);
+	r = gwp_socks5_conn_handle_data(conn, inb, &in_len, out, &out_len);
 	assert(!r);
 	assert(in_len == 11);
 	assert(out_len == 2);
@@ -1427,7 +1423,7 @@ static void test_auth_userpass(void)
 	inb += in_len;
 	in_len = sizeof(in) - 15; /* Remaining data */
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_handle_data(ctx, conn, inb, &in_len, out, &out_len);
+	r = gwp_socks5_conn_handle_data(conn, inb, &in_len, out, &out_len);
 	assert(!r);
 	assert(in_len == (sizeof(in) - 15));
 	assert(out_len == 0);
@@ -1438,7 +1434,7 @@ static void test_auth_userpass(void)
 
 	/* Reply with connect success. */
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_cmd_connect_res(ctx, conn, NULL,
+	r = gwp_socks5_conn_cmd_connect_res(conn, NULL,
 					    GWP_SOCKS5_REP_SUCCESS, out,
 					    &out_len);
 	assert(!r);
@@ -1457,7 +1453,7 @@ static void test_auth_userpass(void)
 	assert(!memcmp(&out[8], "\x00\x00", 2));
 	assert(conn->state == GWP_SOCKS5_ST_FORWARDING);
 	assert(ctx->nr_clients == 1);
-	gwp_socks5_conn_free(ctx, conn);
+	gwp_socks5_conn_free(conn);
 	gwp_socks5_ctx_free(ctx);
 }
 
@@ -1477,7 +1473,7 @@ static void test_offered_methods_no_match(void)
 	conn = test_socks5_alloc_conn(ctx);
 	in_len = sizeof(in);
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_handle_data(ctx, conn, in, &in_len, out, &out_len);
+	r = gwp_socks5_conn_handle_data(conn, in, &in_len, out, &out_len);
 	assert(!r);
 	assert(in_len == sizeof(in));
 	assert(out_len == 2);
@@ -1487,7 +1483,7 @@ static void test_offered_methods_no_match(void)
 	assert(out[1] == 0xff);
 	assert(conn->state == GWP_SOCKS5_ST_ERR);
 	assert(ctx->nr_clients == 1);
-	gwp_socks5_conn_free(ctx, conn);
+	gwp_socks5_conn_free(conn);
 	assert(ctx->nr_clients == 0);
 	gwp_socks5_ctx_free(ctx);
 }
@@ -1508,13 +1504,13 @@ static void test_invalid_version(void)
 	conn = test_socks5_alloc_conn(ctx);
 	in_len = sizeof(in);
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_handle_data(ctx, conn, in, &in_len, out, &out_len);
+	r = gwp_socks5_conn_handle_data(conn, in, &in_len, out, &out_len);
 	assert(r == -EINVAL);
 	assert(in_len == 0);
 	assert(out_len == 0);
 	assert(conn->state == GWP_SOCKS5_ST_ERR);
 	assert(ctx->nr_clients == 1);
-	gwp_socks5_conn_free(ctx, conn);
+	gwp_socks5_conn_free(conn);
 	assert(ctx->nr_clients == 0);
 	gwp_socks5_ctx_free(ctx);
 }
@@ -1535,7 +1531,7 @@ static void test_invalid_connect_addr_type(void)
 	test_socks5_do_handshake_no_auth(ctx, conn);
 	in_len = sizeof(in);
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_handle_data(ctx, conn, in, &in_len, out, &out_len);
+	r = gwp_socks5_conn_handle_data(conn, in, &in_len, out, &out_len);
 	assert(r == -EINVAL);
 	assert(in_len == 0);
 	assert(out_len == 10);
@@ -1553,7 +1549,7 @@ static void test_invalid_connect_addr_type(void)
 	assert(!memcmp(&out[8], "\x00\x00", 2));
 	assert(conn->state == GWP_SOCKS5_ST_ERR);
 	assert(ctx->nr_clients == 1);
-	gwp_socks5_conn_free(ctx, conn);
+	gwp_socks5_conn_free(conn);
 	assert(ctx->nr_clients == 0);
 	gwp_socks5_ctx_free(ctx);
 }
@@ -1576,7 +1572,7 @@ static void test_invalid_command(void)
 	test_socks5_do_handshake_no_auth(ctx, conn);
 	in_len = sizeof(in);
 	out_len = sizeof(out);
-	r = gwp_socks5_conn_handle_data(ctx, conn, in, &in_len, out, &out_len);
+	r = gwp_socks5_conn_handle_data(conn, in, &in_len, out, &out_len);
 	assert(r == -EINVAL);
 	assert(in_len == 0);
 	assert(out_len == 10);
@@ -1594,7 +1590,7 @@ static void test_invalid_command(void)
 	assert(!memcmp(&out[8], "\x00\x00", 2));
 	assert(conn->state == GWP_SOCKS5_ST_ERR);
 	assert(ctx->nr_clients == 1);
-	gwp_socks5_conn_free(ctx, conn);
+	gwp_socks5_conn_free(conn);
 	assert(ctx->nr_clients == 0);
 	gwp_socks5_ctx_free(ctx);
 }
