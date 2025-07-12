@@ -1740,6 +1740,108 @@ static void test_enobufs(void)
 	gwp_socks5_ctx_free(ctx);
 }
 
+static void test_enobufs_combined_with_multi_state_at_once(void)
+{
+	static const uint8_t in[] = {
+		0x05, 0x02, 0x01, 0x02,	/* VER, NMETHODS, {USER/PASS} */
+
+		0x01,			/* VER  */
+		0x04,			/* ULEN */
+		'u', 's', 'e', 'r',	/* UNAME */
+		0x04,			/* PLEN */
+		'p', 'a', 's', 's',	/* PASSWD */
+
+		0x05, 0x01, 0x00, 0x01, /* VER, CMD, RSV, ATYP */
+		0x7f, 0x00, 0x00, 0x01, /* DST.ADDR: 127.0.0.1 */
+		0x00, 0x50, /* DST.PORT: 80 */
+	};
+	static const char cred_data[] = "user:pass\n";
+	char cred_file[] = "/tmp/gwp_socks5_auth.XXXXXX";
+	struct gwp_socks5_conn *conn;
+	struct gwp_socks5_ctx *ctx;
+	struct gwp_socks5_cfg cfg;
+	size_t in_len, out_len;
+	uint8_t out[4096];
+	ssize_t r;
+	size_t i;
+
+	r = file_put_contents(cred_file, cred_data, sizeof(cred_data) - 1);
+	assert(r == (ssize_t)(sizeof(cred_data) - 1));
+
+	cfg.auth_file = cred_file;
+	r = gwp_socks5_ctx_init(&ctx, &cfg);
+	assert(!r);
+	assert(ctx);
+	assert(!strcmp(ctx->cfg.auth_file, cred_file));
+	assert(ctx->nr_clients == 0);
+
+	conn = gwp_socks5_conn_alloc(ctx);
+	assert(conn);
+	assert(conn->state == GWP_SOCKS5_ST_INIT);
+	assert(conn->ctx == ctx);
+	assert(ctx->nr_clients == 1);
+
+	for (i = 0; i < 4; i++) {
+		in_len = sizeof(in);
+		out_len = i;
+		r = gwp_socks5_conn_handle_data(conn, in, &in_len, out, &out_len);
+		assert(r == -ENOBUFS);
+		assert(in_len == 0);
+		if (i < 2)
+			assert(out_len == 2);
+		else
+			assert(out_len == 4);
+		assert(conn->state == GWP_SOCKS5_ST_INIT);
+	}
+
+	in_len = sizeof(in);
+	out_len = 4;
+	r = gwp_socks5_conn_handle_data(conn, in, &in_len, out, &out_len);
+	assert(!r);
+	assert(in_len == sizeof(in));
+	assert(out_len == 4);
+	assert(out[0] == 0x05); /* VER */
+	assert(out[1] == 0x02); /* METHOD: USER/PASS */
+	assert(conn->state == GWP_SOCKS5_ST_CMD_CONNECT);
+	assert(conn->dst_addr.ver == GWP_SOCKS5_ATYP_IPV4);
+	assert(!memcmp(conn->dst_addr.ip4, "\x7f\x00\x00\x01", 4));
+	assert(!memcmp(&conn->dst_addr.port, "\x00\x50", 2));
+
+	/* Reply with connect success. */
+	for (i = 0; i < 10; i++) {
+		out_len = i;
+		r = gwp_socks5_conn_cmd_connect_res(conn, NULL,
+						    GWP_SOCKS5_REP_SUCCESS, out,
+						    &out_len);
+		assert(r == -ENOBUFS);
+		assert(out_len == 10);
+		assert(conn->state == GWP_SOCKS5_ST_CMD_CONNECT);
+	}
+
+	out_len = sizeof(out);
+	r = gwp_socks5_conn_cmd_connect_res(conn, NULL,
+					    GWP_SOCKS5_REP_SUCCESS, out,
+					    &out_len);
+	assert(!r);
+	assert(out_len == 10);
+	/* VER */
+	assert(out[0] == 0x05);
+	/* REP: succeeded */
+	assert(out[1] == 0x00);
+	/* RSV */
+	assert(out[2] == 0x00);
+	/* ATYP: IPv4 address */
+	assert(out[3] == GWP_SOCKS5_ATYP_IPV4);
+	/* BND.ADDR */
+	assert(!memcmp(&out[4], "\x00\x00\x00\x00", 4));
+	/* BND.PORT */
+	assert(!memcmp(&out[8], "\x00\x00", 2));
+	assert(conn->state == GWP_SOCKS5_ST_FORWARDING);
+	assert(ctx->nr_clients == 1);
+	gwp_socks5_conn_free(conn);
+	gwp_socks5_ctx_free(ctx);
+}
+
 __attribute__((__unused__))
 static void gwp_socks5_run_tests(void)
 {
@@ -1757,6 +1859,7 @@ static void gwp_socks5_run_tests(void)
 		test_invalid_command();
 		test_multi_state_at_once();
 		test_enobufs();
+		test_enobufs_combined_with_multi_state_at_once();
 	}
 }
 
