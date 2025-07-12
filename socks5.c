@@ -1595,6 +1595,63 @@ static void test_invalid_command(void)
 	gwp_socks5_ctx_free(ctx);
 }
 
+static void test_multi_state_at_once(void)
+{
+	static const uint8_t in[] = {
+		0x05, 0x01, 0x00,	/* VER, NMETHODS, {NO AUTH} */
+
+		0x05, 0x01, 0x00, 0x01, /* VER, CMD, RSV, ATYP */
+		0x7f, 0x00, 0x00, 0x01, /* DST.ADDR: 127.0.0.1 */
+		0x00, 0x50              /* DST.PORT: 80 */
+	};
+	struct gwp_socks5_conn *conn;
+	struct gwp_socks5_ctx *ctx;
+	size_t in_len, out_len;
+	uint8_t out[4096];
+	int r;
+
+	test_socks5_init_ctx_no_auth(&ctx);
+	conn = test_socks5_alloc_conn(ctx);
+	in_len = sizeof(in);
+	out_len = sizeof(out);
+	r = gwp_socks5_conn_handle_data(conn, in, &in_len, out, &out_len);
+	assert(!r);
+	assert(in_len == sizeof(in));
+	assert(out_len == 2);
+	/* VER */
+	assert(out[0] == 0x05);
+	/* METHOD: NO AUTHENTICATION REQUIRED */
+	assert(out[1] == 0x00);
+	assert(conn->state == GWP_SOCKS5_ST_CMD_CONNECT);
+	assert(conn->dst_addr.ver == GWP_SOCKS5_ATYP_IPV4);
+	assert(!memcmp(conn->dst_addr.ip4, "\x7f\x00\x00\x01", 4));
+	assert(!memcmp(&conn->dst_addr.port, "\x00\x50", 2));
+
+	out_len = sizeof(out);
+	r = gwp_socks5_conn_cmd_connect_res(conn, NULL,
+					    GWP_SOCKS5_REP_SUCCESS, out,
+					    &out_len);
+	assert(!r);
+	assert(out_len == 10);
+	/* VER */
+	assert(out[0] == 0x05);
+	/* REP: succeeded */
+	assert(out[1] == 0x00);
+	/* RSV */
+	assert(out[2] == 0x00);
+	/* ATYP: IPv4 address */
+	assert(out[3] == GWP_SOCKS5_ATYP_IPV4);
+	/* BND.ADDR */
+	assert(!memcmp(&out[4], "\x00\x00\x00\x00", 4));
+	/* BND.PORT */
+	assert(!memcmp(&out[8], "\x00\x00", 2));
+	assert(conn->state == GWP_SOCKS5_ST_FORWARDING);
+	assert(ctx->nr_clients == 1);
+	gwp_socks5_conn_free(conn);
+	assert(ctx->nr_clients == 0);
+	gwp_socks5_ctx_free(ctx);
+}
+
 __attribute__((__unused__))
 static void gwp_socks5_run_tests(void)
 {
@@ -1610,6 +1667,7 @@ static void gwp_socks5_run_tests(void)
 		test_invalid_version();
 		test_invalid_connect_addr_type();
 		test_invalid_command();
+		test_multi_state_at_once();
 	}
 }
 
