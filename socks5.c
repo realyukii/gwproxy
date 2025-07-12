@@ -971,8 +971,11 @@ int gwp_socks5_conn_cmd_connect_res(struct gwp_socks5_conn *conn,
 	};
 	int r = __gwp_socks5_conn_cmd_connect_res(&arg, bind_addr, rep);
 	*out_len = arg.tot_out_len;
-	conn->state = rep == 0x00 ? GWP_SOCKS5_ST_FORWARDING
-				  : GWP_SOCKS5_ST_ERR;
+
+	if (r != -ENOBUFS)
+		conn->state = (rep == 0x00) ? GWP_SOCKS5_ST_FORWARDING
+					    : GWP_SOCKS5_ST_ERR;
+
 	return r;
 }
 
