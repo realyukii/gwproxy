@@ -79,7 +79,7 @@ void gwp_dns_ctx_free(struct gwp_dns_ctx *ctx);
  * @param name		Name to resolve.
  * @param service 	Service to resolve (e.g., "http", "https", or port
  *			number).
- * @return	Pointer to a gwp_dns_entry on success, NULL on failure.
+ * @return		Pointer to a gwp_dns_entry on success, NULL on failure.
  */
 struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 				    const char *name, const char *service);
