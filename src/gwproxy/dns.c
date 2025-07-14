@@ -213,10 +213,13 @@ static void dbq_free(struct dns_batch_query *dbq)
 	if (!dbq)
 		return;
 
-	for (i = 0; i < dbq->nr_entries; i++) {
-		if (dbq->reqs[i]->ar_result)
-			freeaddrinfo(dbq->reqs[i]->ar_result);
+	if (dbq->reqs) {
+		for (i = 0; i < dbq->nr_entries; i++) {
+			if (dbq->reqs[i]->ar_result)
+				freeaddrinfo(dbq->reqs[i]->ar_result);
+		}
 	}
+
 	free(dbq->entries);
 	free(dbq->reqs);
 	free(dbq);
@@ -226,36 +229,25 @@ static int dbq_add_entry(struct dns_batch_query *dbq,
 			  struct gwp_dns_entry *e)
 {
 	struct dbq_entry *de;
-	struct gaicb *req;
 
 	if (dbq->nr_entries >= dbq->cap) {
 		uint32_t new_cap = dbq->cap ? dbq->cap * 2 : 16;
 		struct dbq_entry *nentries;
-		struct gaicb **nreqs;
 
 		nentries = realloc(dbq->entries, new_cap * sizeof(*nentries));
 		if (!nentries)
 			return -ENOMEM;
 		dbq->entries = nentries;
-
-		nreqs = realloc(dbq->reqs, new_cap * sizeof(*nreqs));
-		if (!nreqs)
-			return -ENOMEM;
-		dbq->reqs = nreqs;
 		dbq->cap = new_cap;
 	}
 
 	de = &dbq->entries[dbq->nr_entries];
 	de->e = e;
-
 	memset(&de->cb, 0, sizeof(de->cb));
-	req = &de->cb;
-	req->ar_name = e->name;
-	req->ar_service = e->service;
-	req->ar_request = &dbq->hints;
-	req->ar_result = NULL;
-
-	dbq->reqs[dbq->nr_entries] = req;
+	de->cb.ar_name = e->name;
+	de->cb.ar_service = e->service;
+	de->cb.ar_request = &dbq->hints;
+	de->cb.ar_result = NULL;
 	dbq->nr_entries++;
 
 	return 0;
@@ -328,6 +320,25 @@ static void dispatch_batch_result(struct dns_batch_query *dbq, uint32_t restyp)
 }
 
 /*
+ * Filling dbq->reqs[n] cannot be done in dbq_add_entry() because
+ * the reallocation of dbq->entries may change the address of
+ * dbq->entries[n].cb.
+ */
+static int prep_reqs(struct dns_batch_query *dbq)
+{
+	uint32_t i;
+
+	dbq->reqs = malloc(dbq->nr_entries * sizeof(*dbq->reqs));
+	if (!dbq->reqs)
+		return -ENOMEM;
+
+	for (i = 0; i < dbq->nr_entries; i++)
+		dbq->reqs[i] = &dbq->entries[i].cb;
+
+	return 0;
+}
+
+/*
  * Must be called with ctx->lock held. May release the lock, but
  * it will reacquire it before returning.
  */
@@ -343,10 +354,12 @@ static void process_queue_entry_batch(struct gwp_dns_ctx *ctx)
 	pthread_mutex_unlock(&ctx->lock);
 
 	if (!collect_active_queries(ctx, &head, &dbq)) {
-		memset(&ev, 0, sizeof(ev));
-		ev.sigev_notify = SIGEV_NONE;
-		getaddrinfo_a(GAI_WAIT, dbq->reqs, dbq->nr_entries, &ev);
-		dispatch_batch_result(dbq, ctx->cfg.restyp);
+		if (!prep_reqs(dbq)) {
+			memset(&ev, 0, sizeof(ev));
+			ev.sigev_notify = SIGEV_NONE;
+			getaddrinfo_a(GAI_WAIT, dbq->reqs, dbq->nr_entries, &ev);
+			dispatch_batch_result(dbq, ctx->cfg.restyp);
+		}
 	}
 
 	dbq_free(dbq);
