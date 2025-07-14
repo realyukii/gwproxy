@@ -3,3 +3,4 @@
 /gwproxy
 /.vscode/
 *.so
+*.t
