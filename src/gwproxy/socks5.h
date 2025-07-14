@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <errno.h>
 #include <linux/types.h>
 
 enum gwp_socks5_state {
