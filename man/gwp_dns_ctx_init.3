@@ -1,0 +1,109 @@
+.TH GWP_DNS_CTX 3 "July 16, 2025" "GWPROXY DNS library" "Library Functions Manual"
+.SH NAME
+gwp_dns_ctx_init, gwp_dns_ctx_free \- DNS context management
+.SH SYNOPSIS
+.nf
+.B #include <gwproxy/dns.h>
+.PP
+.BI "enum {"
+.br
+.BI "    GWP_DNS_RESTYP_IPV4_ONLY    = 1,"
+.br
+.BI "    GWP_DNS_RESTYP_IPV6_ONLY    = 2,"
+.br
+.BI "    GWP_DNS_RESTYP_PREFER_IPV4  = 3,"
+.br
+.BI "    GWP_DNS_RESTYP_PREFER_IPV6  = 4,"
+.br
+.BI "};"
+.PP
+.BI "struct gwp_dns_cfg {"
+.br
+.BI "    int      cache_expiry;
+.br
+.BI "    uint32_t nr_workers;"
+.br
+.BI "    uint32_t restyp;"
+.br
+.BI "};"
+.PP
+.BI "int gwp_dns_ctx_init(struct gwp_dns_ctx **" ctx_p ", const struct gwp_dns_cfg *" cfg ");"
+.PP
+.BI "void gwp_dns_ctx_free(struct gwp_dns_ctx *" ctx ");"
+.fi
+.SH DESCRIPTION
+These functions manage the lifecycle of a DNS context in the GWPROXY DNS library.
+.SS gwp_dns_ctx_init
+The
+.B gwp_dns_ctx_init
+function initializes a new DNS context based on the provided configuration
+.IR cfg .
+The context is stored in
+.IR *ctx_p .
+It must be freed with
+.BR gwp_dns_ctx_free ()
+when no longer needed.
+.PP
+The configuration structure
+.B struct gwp_dns_cfg
+defines the behavior of the DNS resolution system:
+.RS 4
+.TP
+.B int cache_expiry
+Cache entry expiry time in seconds. A value less than or equal to 0 disables caching.
+.TP
+.B uint32_t nr_workers
+Number of worker threads to use for concurrent DNS resolutions.
+.TP
+.B uint32_t restyp
+Resolution type preference, specified as one of the following enumeration values:
+.RS 4
+.TP
+.B GWP_DNS_RESTYP_IPV4_ONLY
+Resolve to IPv4 addresses only.
+.TP
+.B GWP_DNS_RESTYP_IPV6_ONLY
+Resolve to IPv6 addresses only.
+.TP
+.B GWP_DNS_RESTYP_PREFER_IPV4
+Prefer IPv4 addresses, but fall back to IPv6 if necessary.
+.TP
+.B GWP_DNS_RESTYP_PREFER_IPV6
+Prefer IPv6 addresses, but fall back to IPv4 if necessary.
+.RE
+.RE
+.PP
+This function allocates necessary resources, including worker threads and cache structures if enabled.
+.SS gwp_dns_ctx_free
+The
+.B gwp_dns_ctx_free
+function releases the DNS context and all associated resources, including
+worker threads, cache entries, and queued requests.
+.PP
+After calling this function, the context pointer
+.I ctx
+should not be used anymore.
+.SH RETURN VALUES
+.BR gwp_dns_ctx_init ()
+returns 0 on success. On failure, it returns a negative error code:
+.RS 4
+.TP
+.B -ENOMEM
+Memory allocation failed.
+.TP
+.B -EINVAL
+Invalid configuration parameters (e.g., invalid
+.B restyp
+).
+.RE
+.PP
+.BR gwp_dns_ctx_free ()
+does not return a value.
+.SH SEE ALSO
+.BR gwp_dns_queue (3),
+.BR gwp_dns_entry_put (3),
+.BR gwp_dns_cache_lookup (3)
+.SH COPYRIGHT
+Copyright (C) 2025 Ammar Faizi <ammarfaizi2@gnuweeb.org>
+.PP
+This library is licensed under GPL-2.0-only.
