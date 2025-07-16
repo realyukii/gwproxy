@@ -1,0 +1,57 @@
+.TH GWP_DNS_CACHE_LOOKUP 3 "July 16, 2025" "GWPROXY DNS library" "Library Functions Manual"
+.SH NAME
+gwp_dns_cache_lookup \- Lookup a DNS entry in the cache
+.SH SYNOPSIS
+.nf
+.B #include <gwproxy/dns.h>
+.PP
+.BI "struct gwp_sockaddr {"
+.br
+.BI "    union {"
+.br
+.BI "        struct sockaddr     sa;"
+.br
+.BI "        struct sockaddr_in  i4;"
+.br
+.BI "        struct sockaddr_in6 i6;"
+.br
+.BI "    };"
+.br
+.BI "};"
+.PP
+.BI "int gwp_dns_cache_lookup(struct gwp_dns_ctx *" ctx ", const char *" name ","
+.br
+.BI "                         const char *" service ", struct gwp_sockaddr *" addr ");"
+.fi
+.SH DESCRIPTION
+The
+.B gwp_dns_cache_lookup
+function searches the cache for a resolved address matching the given
+.I name
+and
+.IR service .
+If found, it fills the
+.I addr
+structure with the result.
+.PP
+This function is only available if caching is enabled in the DNS context configuration.
+.SH RETURN VALUES
+Returns 0 on success, or a negative error code:
+.RS 4
+.TP
+.B -ENOSYS
+Caching is disabled.
+.TP
+.B -ENOENT
+Entry not found in the cache.
+.TP
+.B -EINVAL
+Invalid parameters.
+.RE
+.SH SEE ALSO
+.BR gwp_dns_ctx_init (3),
+.BR gwp_dns_queue (3)
+.SH COPYRIGHT
+Copyright (C) 2025 Ammar Faizi <ammarfaizi2@gnuweeb.org>
+.PP
+This library is licensed under GPL-2.0-only.
