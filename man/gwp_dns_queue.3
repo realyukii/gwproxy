@@ -1,0 +1,121 @@
+.TH GWP_DNS_QUEUE 3 "July 16, 2025" "GWPROXY DNS library" "Library Functions Manual"
+.SH NAME
+gwp_dns_queue, gwp_dns_entry_put \- DNS resolution queuing and entry release
+.SH SYNOPSIS
+.nf
+.B #include <gwproxy/dns.h>
+.PP
+.BI "struct gwp_sockaddr {"
+.br
+.BI "    union {"
+.br
+.BI "        struct sockaddr     sa;"
+.br
+.BI "        struct sockaddr_in  i4;"
+.br
+.BI "        struct sockaddr_in6 i6;"
+.br
+.BI "    };"
+.br
+.BI "};"
+.PP
+.BI "struct gwp_dns_entry {"
+.br
+.BI "    char                *name;"
+.br
+.BI "    char                *service;"
+.br
+.BI "    _Atomic(int)         refcnt;"
+.br
+.BI "    int                  res;"
+.br
+.BI "    int                  ev_fd;"
+.br
+.BI "    struct gwp_sockaddr  addr;"
+.br
+.BI "    struct gwp_dns_entry *next;"
+.br
+.BI "};"
+.PP
+.BI "struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *" ctx ","
+.br
+.BI "                                    const char *" name ", const char *" service ");"
+.PP
+.BI "bool gwp_dns_entry_put(struct gwp_dns_entry *" entry ");"
+.fi
+.SH DESCRIPTION
+These functions handle queuing DNS resolution requests and releasing the associated entries in the GWPROXY DNS library.
+.SS gwp_dns_queue
+The
+.B gwp_dns_queue
+function queues an asynchronous DNS resolution request for the specified
+.I name
+and
+.IR service .
+It returns a pointer to a
+.B struct gwp_dns_entry
+that includes an event file descriptor
+.RI ( ev_fd )
+for waiting on the resolution completion. The eventfd is non-blocking.
+.PP
+Upon completion, the entry's
+.B res
+field is set to 0 on success (with
+.B addr
+filled with the resolved address) or a negative error code on failure.
+.PP
+The caller is responsible for releasing the entry using
+.BR gwp_dns_entry_put ()
+when it is no longer needed.
+.PP
+The
+.B struct gwp_dns_entry
+contains:
+.RS 4
+.TP
+.B char *name
+The hostname being resolved.
+.TP
+.B char *service
+The service name or port number (e.g., "http", "443").
+.TP
+.B _Atomic(int) refcnt
+Atomic reference count for the entry.
+.TP
+.B int res
+Resolution result (0 on success, negative error code on failure).
+.TP
+.B int ev_fd
+Event file descriptor to wait for resolution completion.
+.TP
+.B struct gwp_sockaddr addr
+The resolved socket address.
+.TP
+.B struct gwp_dns_entry *next
+Pointer to the next entry (for internal use).
+.RE
+.SS gwp_dns_entry_put
+The
+.B gwp_dns_entry_put
+function decrements the reference count of the DNS entry. If the reference count reaches zero, the entry is freed.
+.PP
+If
+.I entry
+is NULL, the function does nothing.
+.SH RETURN VALUES
+.BR gwp_dns_queue ()
+returns a pointer to the
+.B struct gwp_dns_entry
+on success, or NULL on failure (e.g., memory allocation failure or invalid parameters).
+.PP
+.BR gwp_dns_entry_put ()
+returns true if the entry was freed (reference count reached zero), false otherwise.
+.SH SEE ALSO
+.BR gwp_dns_ctx_init (3),
+.BR gwp_dns_ctx_free (3),
+.BR gwp_dns_cache_lookup (3),
+.BR eventfd (2)
+.SH COPYRIGHT
+Copyright (C) 2025 Ammar Faizi <ammarfaizi2@gnuweeb.org>
+.PP
+This library is licensed under GPL-2.0-only.
