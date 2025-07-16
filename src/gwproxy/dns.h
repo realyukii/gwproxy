@@ -94,4 +94,23 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
  */
 bool gwp_dns_entry_put(struct gwp_dns_entry *entry);
 
+/**
+ * Lookup a DNS entry in the cache. If the entry is found, it fills the
+ * `addr` structure with the resolved address and returns 0. If the entry is
+ * not found, it returns -ENOENT.
+ *
+ * @param ctx		Pointer to the DNS context.
+ * @param name		Pointer to the name to look up.
+ * @param service	Pointer to the service to look up.
+ * @param addr		Pointer to the sockaddr structure to fill in.
+ * @return		0 on success, negative error code on failure.
+ *
+ * Error values:
+ * -ENOSYS: Cache is disabled.
+ * -ENOENT: Entry not found in the cache.
+ * -EINVAL: Invalid parameters.
+ */
+int gwp_dns_cache_lookup(struct gwp_dns_ctx *ctx, const char *name,
+			 const char *service, struct gwp_sockaddr *addr);
+
 #endif /* #ifndef GWP_DNS_H */
