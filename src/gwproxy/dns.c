@@ -31,6 +31,21 @@ struct gwp_dns_wrk {
 	pthread_t		thread;
 };
 
+struct cache_entry {
+	char			*name;
+	char			*service;
+	struct addrinfo		*res;		/* Cached result.   */
+	time_t			expired_at;	/* Expiration time. */
+};
+
+struct gwp_dns_cache {
+	pthread_rwlock_t	lock;		/* Lock for the cache. */
+	struct cache_entry	*entries;	/* Array of entries. */
+	uint32_t		nr;		/* Number of entries. */
+	uint32_t		cap;		/* Capacity of the array. */
+	time_t			last_scan;	/* Last scan time. */
+};
+
 struct gwp_dns_ctx {
 	volatile bool		should_stop;
 	pthread_mutex_t		lock;
@@ -40,6 +55,7 @@ struct gwp_dns_ctx {
 	struct gwp_dns_entry	*head;
 	struct gwp_dns_entry	*tail;
 	struct gwp_dns_wrk	*workers;
+	struct gwp_dns_cache	*cache;
 	struct gwp_dns_cfg	cfg;
 };
 
@@ -141,8 +157,131 @@ static void prep_hints(struct addrinfo *hints, uint32_t restyp)
 		hints->ai_family = AF_INET6;
 }
 
-int gwp_dns_resolve(const char *name, const char *service,
-		    struct gwp_sockaddr *addr, uint32_t restyp)
+static void free_cache_entry(struct cache_entry *e)
+{
+	if (!e)
+		return;
+
+	free(e->name);
+	if (e->res)
+		freeaddrinfo(e->res);
+}
+
+static void gwp_dns_cache_scan_and_delete_expired_entries(struct gwp_dns_cache *cache)
+{
+	uint32_t i;
+
+	pthread_rwlock_wrlock(&cache->lock);
+	for (i = 0; i < cache->nr; i++) {
+		struct cache_entry *last, *e = &cache->entries[i];
+		time_t now = time(NULL);
+
+		if (e->expired_at > now)
+			continue;
+
+		free_cache_entry(e);
+		last = &cache->entries[cache->nr - 1];
+		cache->nr--;
+		if (e != last) {
+			/*
+			 * Move the last entry to the current position
+			 * to avoid holes in the array.
+			 */
+			*e = *last;
+		} else {
+			/*
+			 * If the last entry is the one we are deleting,
+			 * just clear it.
+			 */
+			memset(e, 0, sizeof(*e));
+		}
+
+		/*
+		 * The next iteration will check the current index
+		 * again as it now contains an untraversed entry
+		 * that may also be expired.
+		 */
+		i--;
+	}
+	pthread_rwlock_unlock(&cache->lock);
+}
+
+static int gwp_dns_cache_insert(struct gwp_dns_ctx *ctx, const char *name,
+				const char *service, struct addrinfo *res)
+{
+	struct gwp_dns_cache *cache = ctx->cache;
+	char *cname, *cservice;
+	struct cache_entry *e;
+	size_t nl, sl;
+	int r;
+
+	if (!cache)
+		return -ENOSYS;
+
+	pthread_rwlock_wrlock(&cache->lock);
+	if (cache->nr >= cache->cap) {
+		size_t new_cap = cache->cap ? cache->cap * 2 : 16;
+		struct cache_entry *nentries;
+
+		nentries = realloc(cache->entries, new_cap * sizeof(*nentries));
+		if (!nentries) {
+			r = -ENOMEM;
+			goto out;
+		}
+
+		cache->entries = nentries;
+		cache->cap = new_cap;
+	}
+
+	nl = strlen(name);
+	sl = service ? strlen(service) : 0;
+	cname = malloc(nl + 1 + sl + 1);
+	if (!cname) {
+		r = -ENOMEM;
+		goto out;
+	}
+
+	cservice = cname + nl + 1;
+	memcpy(cname, name, nl + 1);
+	if (service)
+		memcpy(cservice, service, sl + 1);
+	else
+		cservice[0] = '\0';
+
+	e = &cache->entries[cache->nr++];
+	e->name = cname;
+	e->service = cservice;
+	e->res = res;
+	e->expired_at = time(NULL) + ctx->cfg.cache_expiry;
+	r = 0;
+out:
+	pthread_rwlock_unlock(&cache->lock);
+	return r;
+}
+
+/**
+ * Try to pass the result of the DNS resolution to the cache. If successful,
+ * the `ai` pointer is owned by the cache and the caller MUST not free it.
+ *
+ * @param ctx		The DNS context.
+ * @param name		Name of the DNS entry.
+ * @param service	Service of the DNS entry.
+ * @param ai		The addrinfo result to be cached.
+ * @return		True if the result was successfully passed to the
+ *			cache, false otherwise.
+ */
+static bool try_pass_result_to_cache(struct gwp_dns_ctx *ctx, const char *name,
+				     const char *service, struct addrinfo *ai)
+{
+	if (!ctx->cache)
+		return false;
+
+	return gwp_dns_cache_insert(ctx, name, service, ai) == 0;
+}
+
+int gwp_dns_resolve(struct gwp_dns_ctx *ctx, const char *name,
+		    const char *service, struct gwp_sockaddr *addr,
+		    uint32_t restyp)
 {
 	struct addrinfo *res = NULL, hints;
 	bool found;
@@ -156,7 +295,14 @@ int gwp_dns_resolve(const char *name, const char *service,
 		return -EHOSTUNREACH;
 
 	found = iterate_addr_list(res, addr, restyp);
-	freeaddrinfo(res);
+	if (found) {
+		if (try_pass_result_to_cache(ctx, name, service, res))
+			res = NULL;
+	}
+
+	if (res)
+		freeaddrinfo(res);
+
 	return found ? 0 : -EHOSTUNREACH;
 }
 
@@ -172,6 +318,36 @@ static void gwp_dns_entry_free(struct gwp_dns_entry *e)
 }
 
 /*
+ * Must be called with ctx->lock held. May release the lock, but it
+ * will reacquire it before returning.
+ *
+ * If the DNS cache is enabled, do:
+ *   - Compare the last scan time with the current time.
+ *   - If it's more than ctx->cfg.cache_expiry seconds ago, scan the
+ *     cache to find expired entries and delete them.
+ *   - Save the current time as the last scan time.
+ */
+static void cond_scan_cache(struct gwp_dns_ctx *ctx)
+{
+	if (!ctx->cache)
+		return;
+
+	if (time(NULL) - ctx->cache->last_scan < ctx->cfg.cache_expiry)
+		return;
+
+	pthread_mutex_unlock(&ctx->lock);
+	gwp_dns_cache_scan_and_delete_expired_entries(ctx->cache);
+	pthread_mutex_lock(&ctx->lock);
+
+	/*
+	 * Call time(NULL) again because the scan might have taken
+	 * several seconds if the number of entries is large or
+	 * it got contended by other threads.
+	 */
+	ctx->cache->last_scan = time(NULL);
+}
+
+/*
  * Must be called with ctx->lock held.
  */
 static void wait_for_queue_entry(struct gwp_dns_ctx *ctx)
@@ -179,6 +355,7 @@ static void wait_for_queue_entry(struct gwp_dns_ctx *ctx)
 	ctx->nr_sleeping++;
 	pthread_cond_wait(&ctx->cond, &ctx->lock);
 	ctx->nr_sleeping--;
+	cond_scan_cache(ctx);
 }
 
 /*
@@ -225,8 +402,7 @@ static void dbq_free(struct dns_batch_query *dbq)
 	free(dbq);
 }
 
-static int dbq_add_entry(struct dns_batch_query *dbq,
-			  struct gwp_dns_entry *e)
+static int dbq_add_entry(struct dns_batch_query *dbq, struct gwp_dns_entry *e)
 {
 	struct dbq_entry *de;
 
@@ -300,7 +476,9 @@ static int collect_active_queries(struct gwp_dns_ctx *ctx,
 	return 0;
 }
 
-static void dispatch_batch_result(struct dns_batch_query *dbq, uint32_t restyp)
+static void dispatch_batch_result(struct gwp_dns_ctx *ctx,
+				  struct dns_batch_query *dbq,
+				  uint32_t restyp)
 {
 	struct gwp_dns_entry *e;
 	struct addrinfo *ai;
@@ -316,6 +494,10 @@ static void dispatch_batch_result(struct dns_batch_query *dbq, uint32_t restyp)
 			e->res = gai_error(dbq->reqs[i]);
 
 		eventfd_write(e->ev_fd, 1);
+		if (!e->res) {
+			if (try_pass_result_to_cache(ctx, e->name, e->service, ai))
+				dbq->reqs[i]->ar_result = NULL;
+		}
 	}
 }
 
@@ -358,7 +540,7 @@ static void process_queue_entry_batch(struct gwp_dns_ctx *ctx)
 			memset(&ev, 0, sizeof(ev));
 			ev.sigev_notify = SIGEV_NONE;
 			getaddrinfo_a(GAI_WAIT, dbq->reqs, dbq->nr_entries, &ev);
-			dispatch_batch_result(dbq, ctx->cfg.restyp);
+			dispatch_batch_result(ctx, dbq, ctx->cfg.restyp);
 		}
 	}
 
@@ -397,7 +579,7 @@ static void process_queue_entry_single(struct gwp_dns_ctx *ctx)
 		goto out;
 	}
 
-	e->res = gwp_dns_resolve(e->name, e->service, &e->addr, ctx->cfg.restyp);
+	e->res = gwp_dns_resolve(ctx, e->name, e->service, &e->addr, ctx->cfg.restyp);
 	eventfd_write(e->ev_fd, 1);
 	gwp_dns_entry_put(e);
 out:
@@ -512,15 +694,98 @@ out_err:
 	return r;
 }
 
+int gwp_dns_cache_lookup(struct gwp_dns_ctx *ctx, const char *name,
+			 const char *service, struct gwp_sockaddr *addr)
+{
+	struct gwp_dns_cache *cache;
+	bool found_expired;
+	time_t now;
+	uint32_t i;
+	int r;
+
+	if (!ctx->cache)
+		return -ENOSYS;
+
+	cache = ctx->cache;
+	pthread_rwlock_rdlock(&cache->lock);
+	r = -ENOENT;
+	now = time(NULL);
+	found_expired = false;
+	for (i = 0; i < cache->nr; i++) {
+		struct cache_entry *e = &cache->entries[i];
+
+		found_expired |= (e->expired_at <= now);
+		if (strcmp(e->name, name) || strcmp(e->service, service))
+			continue;
+
+		if (iterate_addr_list(e->res, addr, ctx->cfg.restyp)) {
+			r = 0;
+			break;
+		}
+	}
+	pthread_rwlock_unlock(&cache->lock);
+	if (found_expired)
+		gwp_dns_cache_scan_and_delete_expired_entries(cache);
+
+	return r;
+}
+
+static int init_cache(struct gwp_dns_ctx *ctx)
+{
+	struct gwp_dns_cache *cache;
+	int r;
+
+	if (ctx->cfg.cache_expiry <= 0) {
+		/*
+		 * Cache is disabled.
+		 */
+		ctx->cache = NULL;
+		return 0;
+	}
+
+	cache = calloc(1, sizeof(*cache));
+	if (!cache)
+		return -ENOMEM;
+
+	r = pthread_rwlock_init(&cache->lock, NULL);
+	if (r) {
+		r = -r;
+		free(cache);
+		return r;
+	}
+
+	ctx->cache = cache;
+	return 0;
+}
+
+static void free_cache(struct gwp_dns_cache *cache)
+{
+	uint32_t i;
+
+	if (!cache)
+		return;
+
+	pthread_rwlock_destroy(&cache->lock);
+	for (i = 0; i < cache->nr; i++) {
+		struct cache_entry *e = &cache->entries[i];
+		free(e->name);
+		if (e->res)
+			freeaddrinfo(e->res);
+	}
+	free(cache->entries);
+	free(cache);
+}
+
 int gwp_dns_ctx_init(struct gwp_dns_ctx **ctx_p, const struct gwp_dns_cfg *cfg)
 {
 	struct gwp_dns_ctx *ctx;
 	int r;
 
-	ctx = malloc(sizeof(*ctx));
+	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx)
 		return -ENOMEM;
 
+	ctx->cfg = *cfg;
 	r = pthread_mutex_init(&ctx->lock, NULL);
 	if (r) {
 		r = -r;
@@ -533,7 +798,10 @@ int gwp_dns_ctx_init(struct gwp_dns_ctx **ctx_p, const struct gwp_dns_cfg *cfg)
 		goto out_destroy_mutex;
 	}
 
-	ctx->cfg = *cfg;
+	r = init_cache(ctx);
+	if (r)
+		goto out_destroy_cond;
+
 	ctx->nr_sleeping = 0;
 	ctx->nr_entries = 0;
 	ctx->workers = NULL;
@@ -542,10 +810,12 @@ int gwp_dns_ctx_init(struct gwp_dns_ctx **ctx_p, const struct gwp_dns_cfg *cfg)
 	ctx->should_stop = false;
 	r = init_workers(ctx);
 	if (r)
-		goto out_destroy_cond;
+		goto out_free_cache;
 
 	*ctx_p = ctx;
 	return 0;
+out_free_cache:
+	free_cache(ctx->cache);
 out_destroy_cond:
 	pthread_cond_destroy(&ctx->cond);
 out_destroy_mutex:
@@ -568,6 +838,7 @@ void gwp_dns_ctx_free(struct gwp_dns_ctx *ctx)
 	pthread_mutex_destroy(&ctx->lock);
 	pthread_cond_destroy(&ctx->cond);
 	put_all_queued_entries(ctx);
+	free_cache(ctx->cache);
 	free(ctx);
 }
 

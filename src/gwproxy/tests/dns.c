@@ -2,6 +2,9 @@
 /*
  * Copyright (C) 2025  Ammar Faizi <ammarfaizi2@gnuweeb.org>
  */
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <stdio.h>
 #include <assert.h>
 #include <gwproxy/dns.h>
@@ -99,9 +102,43 @@ static void test_basic_dns_multiple_requests(void)
 	gwp_dns_ctx_free(ctx);
 }
 
+static void test_dns_cache(void)
+{
+	struct gwp_dns_cfg cfg = { .nr_workers = 1, .cache_expiry = 10 };
+	struct gwp_sockaddr addr;
+	struct gwp_dns_ctx *ctx;
+	struct gwp_dns_entry *e;
+	struct pollfd pfd;
+	int r;
+
+	r = gwp_dns_ctx_init(&ctx, &cfg);
+	assert(!r);
+	assert(ctx != NULL);
+
+	e = gwp_dns_queue(ctx, "localhost", "80");
+	assert(e != NULL);
+	assert(e->ev_fd >= 0);
+	pfd.fd = e->ev_fd;
+	pfd.events = POLLIN;
+	r = poll_all_in(&pfd, 1, 5000);
+	assert(r == 0);
+	assert(e->res == 0);
+	assert(e->addr.sa.sa_family == AF_INET ||
+	       e->addr.sa.sa_family == AF_INET6);
+	gwp_dns_entry_put(e);
+
+	r = gwp_dns_cache_lookup(ctx, "localhost", "80", &addr);
+	assert(!r);
+	assert(addr.sa.sa_family == AF_INET || addr.sa.sa_family == AF_INET6);
+	r = gwp_dns_cache_lookup(ctx, "aaaa.com", "80", &addr);
+	assert(r == -ENOENT);
+	gwp_dns_ctx_free(ctx);
+}
+
 int main(void)
 {
 	test_basic_dns_multiple_requests();
+	test_dns_cache();
 	printf("All tests passed.\n");
 	return 0;
 }
