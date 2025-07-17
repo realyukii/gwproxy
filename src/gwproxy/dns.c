@@ -727,7 +727,12 @@ int gwp_dns_cache_lookup(struct gwp_dns_ctx *ctx, const char *name,
 		if (exp)
 			continue;
 
-		if (strcmp(e->name, name) || strcmp(e->service, service))
+		if (strcmp(e->name, name))
+			continue;
+
+		if (service && strcmp(e->service, service))
+			continue;
+		else if (!service && e->service[0] != '\0')
 			continue;
 
 		if (iterate_addr_list(e->res, addr, ctx->cfg.restyp)) {
