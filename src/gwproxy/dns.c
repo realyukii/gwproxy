@@ -74,6 +74,9 @@ static bool iterate_addr_list(struct addrinfo *res, struct gwp_sockaddr *gs,
 {
 	struct addrinfo *ai;
 
+	if (!res)
+		return false;
+
 	/*
 	 * Handle IPV4_ONLY and IPV6_ONLY cases together.
 	 */
@@ -290,8 +293,6 @@ int gwp_dns_resolve(struct gwp_dns_ctx *ctx, const char *name,
 	r = getaddrinfo(name, service, &hints, &res);
 	if (r)
 		return -r;
-	if (!res)
-		return -EHOSTUNREACH;
 
 	found = iterate_addr_list(res, addr, restyp);
 	if (found) {
@@ -488,10 +489,11 @@ static void dispatch_batch_result(int r, struct gwp_dns_ctx *ctx,
 		ai = dbq->reqs[i]->ar_result;
 
 		if (!r) {
-			if (!ai || !iterate_addr_list(ai, &e->addr, restyp))
-				e->res = -EHOSTUNREACH;
-			else
-				e->res = gai_error(dbq->reqs[i]);
+			e->res = gai_error(dbq->reqs[i]);
+			if (!e->res) {
+				if (!iterate_addr_list(ai, &e->addr, restyp))
+					e->res = -EHOSTUNREACH;
+			}
 		} else {
 			e->res = r;
 		}
