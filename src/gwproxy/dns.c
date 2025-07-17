@@ -475,7 +475,7 @@ static int collect_active_queries(struct gwp_dns_ctx *ctx,
 	return 0;
 }
 
-static void dispatch_batch_result(struct gwp_dns_ctx *ctx,
+static void dispatch_batch_result(int r, struct gwp_dns_ctx *ctx,
 				  struct dns_batch_query *dbq,
 				  uint32_t restyp)
 {
@@ -487,10 +487,14 @@ static void dispatch_batch_result(struct gwp_dns_ctx *ctx,
 		e = dbq->entries[i].e;
 		ai = dbq->reqs[i]->ar_result;
 
-		if (!ai || !iterate_addr_list(ai, &e->addr, restyp))
-			e->res = -EHOSTUNREACH;
-		else
-			e->res = gai_error(dbq->reqs[i]);
+		if (!r) {
+			if (!ai || !iterate_addr_list(ai, &e->addr, restyp))
+				e->res = -EHOSTUNREACH;
+			else
+				e->res = gai_error(dbq->reqs[i]);
+		} else {
+			e->res = r;
+		}
 
 		eventfd_write(e->ev_fd, 1);
 		if (!e->res) {
@@ -527,7 +531,6 @@ static void process_queue_entry_batch(struct gwp_dns_ctx *ctx)
 {
 	struct gwp_dns_entry *head = unplug_queue_list(ctx);
 	struct dns_batch_query *dbq = NULL;
-	struct sigevent ev;
 
 	if (!head)
 		return;
@@ -536,10 +539,13 @@ static void process_queue_entry_batch(struct gwp_dns_ctx *ctx)
 
 	if (!collect_active_queries(ctx, &head, &dbq)) {
 		if (!prep_reqs(dbq)) {
+			struct sigevent ev;
+			int r;
+
 			memset(&ev, 0, sizeof(ev));
 			ev.sigev_notify = SIGEV_NONE;
-			getaddrinfo_a(GAI_WAIT, dbq->reqs, dbq->nr_entries, &ev);
-			dispatch_batch_result(ctx, dbq, ctx->cfg.restyp);
+			r = getaddrinfo_a(GAI_WAIT, dbq->reqs, dbq->nr_entries, &ev);
+			dispatch_batch_result(r, ctx, dbq, ctx->cfg.restyp);
 		}
 	}
 
