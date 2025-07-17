@@ -527,7 +527,6 @@ static void process_queue_entry_batch(struct gwp_dns_ctx *ctx)
 {
 	struct gwp_dns_entry *head = unplug_queue_list(ctx);
 	struct dns_batch_query *dbq = NULL;
-	struct sigevent ev;
 
 	if (!head)
 		return;
@@ -536,8 +535,10 @@ static void process_queue_entry_batch(struct gwp_dns_ctx *ctx)
 
 	if (!collect_active_queries(ctx, &head, &dbq)) {
 		if (!prep_reqs(dbq)) {
+			struct sigevent ev;
 			memset(&ev, 0, sizeof(ev));
 			ev.sigev_notify = SIGEV_NONE;
+
 			getaddrinfo_a(GAI_WAIT, dbq->reqs, dbq->nr_entries, &ev);
 			dispatch_batch_result(ctx, dbq, ctx->cfg.restyp);
 		}
