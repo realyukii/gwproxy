@@ -72,29 +72,29 @@ static void test_basic_dns_multiple_requests(void)
 	struct pollfd pfd[ARRAY_SIZE(req_template)];
 	struct gwp_dns_ctx *ctx;
 	int i, n;
-	int ret;
+	int r;
 
-	ret = gwp_dns_ctx_init(&ctx, &cfg);
-	assert(ret == 0);
+	r = gwp_dns_ctx_init(&ctx, &cfg);
+	assert(!r);
 	assert(ctx != NULL);
 
 	n = (int)ARRAY_SIZE(req_template);
 	for (i = 0; i < n; i++) {
-		const struct req_template *r = &req_template[i];
-		earr[i] = gwp_dns_queue(ctx, r->domain, r->service);
-		assert(earr[i] != NULL);
+		const struct req_template *rt = &req_template[i];
+		earr[i] = gwp_dns_queue(ctx, rt->domain, rt->service);
+		assert(earr[i]);
 		assert(earr[i]->ev_fd >= 0);
 		pfd[i].fd = earr[i]->ev_fd;
 		pfd[i].events = POLLIN;
 	}
 
-	ret = poll_all_in(pfd, n, 5000);
-	assert(ret == 0);
+	r = poll_all_in(pfd, n, 5000);
+	assert(!r);
 
 	for (i = 0; i < n; i++) {
 		assert(earr[i]->res == 0);
-		assert(earr[i]->addr.sa.sa_family == AF_INET ||
-		       earr[i]->addr.sa.sa_family == AF_INET6);
+		r = earr[i]->addr.sa.sa_family;
+		assert(r == AF_INET || r == AF_INET6);
 	}
 
 	for (i = 0; i < n; i++)
@@ -123,13 +123,14 @@ static void test_dns_cache(void)
 	r = poll_all_in(&pfd, 1, 5000);
 	assert(r == 0);
 	assert(e->res == 0);
-	assert(e->addr.sa.sa_family == AF_INET ||
-	       e->addr.sa.sa_family == AF_INET6);
+	r = e->addr.sa.sa_family;
+	assert(r == AF_INET || r == AF_INET6);
 	gwp_dns_entry_put(e);
 
 	r = gwp_dns_cache_lookup(ctx, "localhost", "80", &addr);
 	assert(!r);
-	assert(addr.sa.sa_family == AF_INET || addr.sa.sa_family == AF_INET6);
+	r = addr.sa.sa_family;
+	assert(r == AF_INET || r == AF_INET6);
 	r = gwp_dns_cache_lookup(ctx, "aaaa.com", "80", &addr);
 	assert(r == -ENOENT);
 	gwp_dns_ctx_free(ctx);

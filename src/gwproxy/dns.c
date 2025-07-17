@@ -180,8 +180,7 @@ static void gwp_dns_cache_scan_and_delete_expired_entries(struct gwp_dns_cache *
 			continue;
 
 		free_cache_entry(e);
-		last = &cache->entries[cache->nr - 1];
-		cache->nr--;
+		last = &cache->entries[--cache->nr];
 		if (e != last) {
 			/*
 			 * Move the last entry to the current position
@@ -562,8 +561,10 @@ static void process_queue_entry_single(struct gwp_dns_ctx *ctx)
 
 	e = ctx->head;
 	ctx->head = e->next;
-	if (!ctx->head)
+	if (!ctx->head) {
 		ctx->tail = NULL;
+		assert(ctx->nr_entries == 1);
+	}
 
 	ctx->nr_entries--;
 	pthread_mutex_unlock(&ctx->lock);
