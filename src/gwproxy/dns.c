@@ -720,8 +720,13 @@ int gwp_dns_cache_lookup(struct gwp_dns_ctx *ctx, const char *name,
 	found_expired = false;
 	for (i = 0; i < cache->nr; i++) {
 		struct cache_entry *e = &cache->entries[i];
+		bool exp = (e->expired_at <= now);
 
-		found_expired |= (e->expired_at <= now);
+		found_expired |= exp;
+
+		if (exp)
+			continue;
+
 		if (strcmp(e->name, name) || strcmp(e->service, service))
 			continue;
 
