@@ -6,6 +6,7 @@
 #define GWPROXY_DNS_CACHE_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 struct gwp_dns_cache_entry {
 	/**
@@ -24,6 +25,22 @@ struct gwp_dns_cache_entry {
 	uint8_t		nr_i6;
 	uint8_t		block[];
 };
+
+static inline uint8_t *gwp_dns_cache_entget_i4(struct gwp_dns_cache_entry *e)
+{
+	if (!e->nr_i4)
+		return NULL;
+
+	return e->block + e->name_len;
+}
+
+static inline uint8_t *gwp_dns_cache_entget_i6(struct gwp_dns_cache_entry *e)
+{
+	if (!e->nr_i6)
+		return NULL;
+
+	return e->block + e->name_len + (e->nr_i4 * 4);
+}
 
 struct gwp_dns_cache;
 
