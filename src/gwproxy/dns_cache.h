@@ -96,6 +96,7 @@ void gwp_dns_cache_putent(struct gwp_dns_cache_entry *e);
  * @param expired_at	The time when the entry expires.
  * @return int		0 on success, negative error code on failure.
  */
+struct addrinfo;
 int gwp_dns_cache_insert(struct gwp_dns_cache *cache, const char *key,
 			 const struct addrinfo *ai, time_t expired_at);
 
