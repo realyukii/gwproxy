@@ -331,6 +331,10 @@ static int dns_map_lookup_and_get(struct dns_hash_map *map, const char *key,
 
 	while (cur) {
 		if (cur->e.name_len == nl && !memcmp(cur->e.block, key, nl)) {
+
+			if (cur->expired_at <= time(NULL))
+				return -ETIMEDOUT;
+
 			get_dns_entry(cur);
 			*ep = cur;
 			return 0;
@@ -401,6 +405,8 @@ int gwp_dns_cache_getent(struct gwp_dns_cache *cache, const char *key,
 	pthread_rwlock_unlock(&cache->lock);
 	if (de)
 		*ep = &de->e;
+	else if (r == -ETIMEDOUT)
+		gwp_dns_cache_housekeep(cache);
 
 	return r;
 }
