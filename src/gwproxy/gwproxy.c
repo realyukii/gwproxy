@@ -2789,11 +2789,10 @@ static int handle_socks5_data(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	out = gcp->target.buf + gcp->target.len;
 	out_len = gcp->target.cap - gcp->target.len;
 	r = gwp_socks5_conn_handle_data(sc, in, &in_len, out, &out_len);
-	if (r)
-		return (r == -EAGAIN) ? 0 : r;
-
 	gwp_conn_buf_advance(&gcp->client, in_len);
 	gcp->target.len += out_len;
+	if (r)
+		return (r == -EAGAIN) ? 0 : r;
 
 	if (sc->state == GWP_SOCKS5_ST_CMD_CONNECT) {
 		r = socks5_prepare_target_addr(w, gcp);
@@ -2839,12 +2838,15 @@ static int handle_ev_client_socks5(struct gwp_wrk *w,
 			return sr;
 	}
 
-	r = handle_socks5_data(w, gcp);
-	if (gcp->target.len) {
-		r = handle_socks5_pollout(w, gcp);
-		if (r && r != -EAGAIN)
-			return r;
+	if (gcp->conn_state == CONN_STATE_SOCKS5_DATA) {
+		r = handle_socks5_data(w, gcp);
+		if (gcp->target.len) {
+			r = handle_socks5_pollout(w, gcp);
+			if (r && r != -EAGAIN)
+				return r;
+		}
 	}
+
 	return r;
 }
 
