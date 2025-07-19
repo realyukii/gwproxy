@@ -34,6 +34,7 @@ struct dns_cache_entry {
 struct dns_hash_map {
 	struct dns_cache_entry	**table;
 	size_t			nr_buckets;
+	size_t			nr_entries;
 };
 
 struct gwp_dns_cache {
@@ -62,6 +63,7 @@ static int dns_map_init(struct dns_hash_map *map, size_t nr_buckets)
 		return -ENOMEM;
 
 	map->nr_buckets = nr_buckets;
+	map->nr_entries = 0;
 	return 0;
 }
 
@@ -214,6 +216,7 @@ static int dns_map_insert(struct dns_hash_map *map, const char *key,
 		 */
 		map->table[idx] = de;
 		de->next = NULL;
+		map->nr_entries++;
 		return 0;
 	}
 
@@ -263,6 +266,7 @@ static int dns_map_insert(struct dns_hash_map *map, const char *key,
 			/*
 			 * Remove expired entries.
 			 */
+			map->nr_entries--;
 			next = cur->next;
 			put_dns_entry(cur);
 			if (prev)
@@ -300,6 +304,7 @@ static int dns_map_insert(struct dns_hash_map *map, const char *key,
 	 * Case 3. The worst case.
 	 * Collision with a different key or an expired entry.
 	 */
+	map->nr_entries++;
 	de->next = NULL;
 	if (prev)
 		prev->next = de;
@@ -417,6 +422,7 @@ static void dns_map_scan_and_remove_expired(struct dns_hash_map *map)
 		while (cur) {
 			next = cur->next;
 			if (cur->expired_at <= time(NULL)) {
+				map->nr_entries--;
 				put_dns_entry(cur);
 			} else {
 				cur->next = map->table[i];
