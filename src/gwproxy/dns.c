@@ -7,6 +7,7 @@
 #endif
 
 #include "dns.h"
+#include "dns_cache.h"
 
 #include <assert.h>
 #include <stdlib.h>
@@ -31,21 +32,6 @@ struct gwp_dns_wrk {
 	pthread_t		thread;
 };
 
-struct cache_entry {
-	char			*name;
-	char			*service;
-	struct addrinfo		*res;		/* Cached result.   */
-	time_t			expired_at;	/* Expiration time. */
-};
-
-struct gwp_dns_cache {
-	pthread_rwlock_t	lock;		/* Lock for the cache. */
-	struct cache_entry	*entries;	/* Array of entries. */
-	uint32_t		nr;		/* Number of entries. */
-	uint32_t		cap;		/* Capacity of the array. */
-	time_t			last_scan;	/* Last scan time. */
-};
-
 struct gwp_dns_ctx {
 	volatile bool		should_stop;
 	pthread_mutex_t		lock;
@@ -56,6 +42,7 @@ struct gwp_dns_ctx {
 	struct gwp_dns_entry	*tail;
 	struct gwp_dns_wrk	*workers;
 	struct gwp_dns_cache	*cache;
+	time_t			last_scan;
 	struct gwp_dns_cfg	cfg;
 };
 
@@ -160,125 +147,16 @@ static void prep_hints(struct addrinfo *hints, uint32_t restyp)
 		hints->ai_family = AF_INET6;
 }
 
-static void free_cache_entry(struct cache_entry *e)
+static void try_pass_result_to_cache(struct gwp_dns_ctx *ctx, const char *name,
+				     const struct addrinfo *ai)
 {
-	if (!e)
+	int x;
+
+	if (!ctx->cache)
 		return;
 
-	free(e->name);
-	if (e->res)
-		freeaddrinfo(e->res);
-}
-
-static void gwp_dns_cache_scan_and_delete_expired_entries(struct gwp_dns_cache *cache)
-{
-	uint32_t i;
-
-	pthread_rwlock_wrlock(&cache->lock);
-	for (i = 0; i < cache->nr; i++) {
-		struct cache_entry *last, *e = &cache->entries[i];
-		time_t now = time(NULL);
-
-		if (e->expired_at > now)
-			continue;
-
-		free_cache_entry(e);
-		last = &cache->entries[--cache->nr];
-		if (e != last) {
-			/*
-			 * Move the last entry to the current position
-			 * to avoid holes in the array.
-			 */
-			*e = *last;
-		} else {
-			/*
-			 * If the last entry is the one we are deleting,
-			 * just clear it.
-			 */
-			memset(e, 0, sizeof(*e));
-		}
-
-		/*
-		 * The next iteration will check the current index
-		 * again as it now contains an untraversed entry
-		 * that may also be expired.
-		 */
-		i--;
-	}
-	pthread_rwlock_unlock(&cache->lock);
-}
-
-static int gwp_dns_cache_insert(struct gwp_dns_ctx *ctx, const char *name,
-				const char *service, struct addrinfo *res)
-{
-	struct gwp_dns_cache *cache = ctx->cache;
-	char *cname, *cservice;
-	struct cache_entry *e;
-	size_t nl, sl;
-	int r;
-
-	if (!cache)
-		return -ENOSYS;
-
-	pthread_rwlock_wrlock(&cache->lock);
-	if (cache->nr >= cache->cap) {
-		size_t new_cap = cache->cap ? cache->cap * 2 : 16;
-		struct cache_entry *nentries;
-
-		nentries = realloc(cache->entries, new_cap * sizeof(*nentries));
-		if (!nentries) {
-			r = -ENOMEM;
-			goto out;
-		}
-
-		cache->entries = nentries;
-		cache->cap = new_cap;
-	}
-
-	nl = strlen(name);
-	sl = service ? strlen(service) : 0;
-	cname = malloc(nl + 1 + sl + 1);
-	if (!cname) {
-		r = -ENOMEM;
-		goto out;
-	}
-
-	cservice = cname + nl + 1;
-	memcpy(cname, name, nl + 1);
-	if (service)
-		memcpy(cservice, service, sl + 1);
-	else
-		cservice[0] = '\0';
-
-	e = &cache->entries[cache->nr++];
-	e->name = cname;
-	e->service = cservice;
-	e->res = res;
-	e->expired_at = time(NULL) + ctx->cfg.cache_expiry;
-	r = 0;
-out:
-	pthread_rwlock_unlock(&cache->lock);
-	return r;
-}
-
-/**
- * Try to pass the result of the DNS resolution to the cache. If successful,
- * the `ai` pointer is owned by the cache and the caller MUST not free it.
- *
- * @param ctx		The DNS context.
- * @param name		Name of the DNS entry.
- * @param service	Service of the DNS entry.
- * @param ai		The addrinfo result to be cached.
- * @return		True if the result was successfully passed to the
- *			cache, false otherwise.
- */
-static bool try_pass_result_to_cache(struct gwp_dns_ctx *ctx, const char *name,
-				     const char *service, struct addrinfo *ai)
-{
-	if (!ctx->cache)
-		return false;
-
-	return gwp_dns_cache_insert(ctx, name, service, ai) == 0;
+	x = ctx->cfg.cache_expiry;
+	gwp_dns_cache_insert(ctx->cache, name, ai, time(NULL) + x);
 }
 
 int gwp_dns_resolve(struct gwp_dns_ctx *ctx, const char *name,
@@ -295,10 +173,8 @@ int gwp_dns_resolve(struct gwp_dns_ctx *ctx, const char *name,
 		return -r;
 
 	found = iterate_addr_list(res, addr, restyp);
-	if (found) {
-		if (try_pass_result_to_cache(ctx, name, service, res))
-			res = NULL;
-	}
+	if (found)
+		try_pass_result_to_cache(ctx, name, res);
 
 	if (res)
 		freeaddrinfo(res);
@@ -332,11 +208,11 @@ static void cond_scan_cache(struct gwp_dns_ctx *ctx)
 	if (!ctx->cache)
 		return;
 
-	if (time(NULL) - ctx->cache->last_scan < ctx->cfg.cache_expiry)
+	if (time(NULL) - ctx->last_scan < ctx->cfg.cache_expiry)
 		return;
 
 	pthread_mutex_unlock(&ctx->lock);
-	gwp_dns_cache_scan_and_delete_expired_entries(ctx->cache);
+	gwp_dns_cache_housekeep(ctx->cache);
 	pthread_mutex_lock(&ctx->lock);
 
 	/*
@@ -344,7 +220,7 @@ static void cond_scan_cache(struct gwp_dns_ctx *ctx)
 	 * several seconds if the number of entries is large or
 	 * it got contended by other threads.
 	 */
-	ctx->cache->last_scan = time(NULL);
+	ctx->last_scan = time(NULL);
 }
 
 /*
@@ -499,10 +375,8 @@ static void dispatch_batch_result(int r, struct gwp_dns_ctx *ctx,
 		}
 
 		eventfd_write(e->ev_fd, 1);
-		if (!e->res) {
-			if (try_pass_result_to_cache(ctx, e->name, e->service, ai))
-				dbq->reqs[i]->ar_result = NULL;
-		}
+		if (!e->res)
+			try_pass_result_to_cache(ctx, e->name, ai);
 	}
 }
 
@@ -703,49 +577,75 @@ out_err:
 	return r;
 }
 
+static bool fetch_i4(struct gwp_dns_cache_entry *e, struct gwp_sockaddr *addr,
+		     uint16_t port)
+{
+	uint8_t *b = gwp_dns_cache_entget_i4(e);
+	if (!b)
+		return false;
+
+	memset(addr, 0, sizeof(*addr));
+	addr->i4.sin_family = AF_INET;
+	addr->i4.sin_port = htons(port);
+	memcpy(&addr->i4.sin_addr, b, 4);
+	return true;
+}
+
+static bool fetch_i6(struct gwp_dns_cache_entry *e, struct gwp_sockaddr *addr,
+		     uint16_t port)
+{
+	uint8_t *b = gwp_dns_cache_entget_i6(e);
+	if (!b)
+		return false;
+
+	memset(addr, 0, sizeof(*addr));
+	addr->i6.sin6_family = AF_INET6;
+	addr->i6.sin6_port = htons(port);
+	memcpy(&addr->i6.sin6_addr, b, 16);
+	return true;
+}
+
+static int fetch_addr(struct gwp_dns_cache_entry *e, struct gwp_sockaddr *addr,
+		      uint16_t port, uint32_t restyp)
+{
+	if (restyp == GWP_DNS_RESTYP_IPV4_ONLY) {
+		if (!fetch_i4(e, addr, port))
+			return -EHOSTUNREACH;
+	} else if (restyp == GWP_DNS_RESTYP_IPV6_ONLY) {
+		if (!fetch_i6(e, addr, port))
+			return -EHOSTUNREACH;
+	} else if (restyp == GWP_DNS_RESTYP_PREFER_IPV6) {
+		if (!fetch_i6(e, addr, port)) {
+			if (!fetch_i4(e, addr, port))
+				return -EHOSTUNREACH;
+		}
+	} else if (restyp == GWP_DNS_RESTYP_PREFER_IPV4) {
+		if (!fetch_i4(e, addr, port)) {
+			if (!fetch_i6(e, addr, port))
+				return -EHOSTUNREACH;
+		}
+	} else {
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 int gwp_dns_cache_lookup(struct gwp_dns_ctx *ctx, const char *name,
 			 const char *service, struct gwp_sockaddr *addr)
 {
-	struct gwp_dns_cache *cache;
-	bool found_expired;
-	time_t now;
-	uint32_t i;
+	struct gwp_dns_cache_entry *e;
 	int r;
 
 	if (!ctx->cache)
 		return -ENOSYS;
 
-	cache = ctx->cache;
-	pthread_rwlock_rdlock(&cache->lock);
-	r = -ENOENT;
-	now = time(NULL);
-	found_expired = false;
-	for (i = 0; i < cache->nr; i++) {
-		struct cache_entry *e = &cache->entries[i];
-		bool exp = (e->expired_at <= now);
+	r = gwp_dns_cache_getent(ctx->cache, name, &e);
+	if (r)
+		return r;
 
-		found_expired |= exp;
-
-		if (exp)
-			continue;
-
-		if (strcmp(e->name, name))
-			continue;
-
-		if (service && strcmp(e->service, service))
-			continue;
-		else if (!service && e->service[0] != '\0')
-			continue;
-
-		if (iterate_addr_list(e->res, addr, ctx->cfg.restyp)) {
-			r = 0;
-			break;
-		}
-	}
-	pthread_rwlock_unlock(&cache->lock);
-	if (found_expired)
-		gwp_dns_cache_scan_and_delete_expired_entries(cache);
-
+	r = fetch_addr(e, addr, service ? atoi(service) : 0, ctx->cfg.restyp);
+	gwp_dns_cache_putent(e);
 	return r;
 }
 
@@ -762,16 +662,9 @@ static int init_cache(struct gwp_dns_ctx *ctx)
 		return 0;
 	}
 
-	cache = calloc(1, sizeof(*cache));
-	if (!cache)
-		return -ENOMEM;
-
-	r = pthread_rwlock_init(&cache->lock, NULL);
-	if (r) {
-		r = -r;
-		free(cache);
+	r = gwp_dns_cache_init(&cache, 8192);
+	if (r)
 		return r;
-	}
 
 	ctx->cache = cache;
 	return 0;
@@ -779,20 +672,11 @@ static int init_cache(struct gwp_dns_ctx *ctx)
 
 static void free_cache(struct gwp_dns_cache *cache)
 {
-	uint32_t i;
-
 	if (!cache)
 		return;
 
-	pthread_rwlock_destroy(&cache->lock);
-	for (i = 0; i < cache->nr; i++) {
-		struct cache_entry *e = &cache->entries[i];
-		free(e->name);
-		if (e->res)
-			freeaddrinfo(e->res);
-	}
-	free(cache->entries);
-	free(cache);
+	gwp_dns_cache_free(cache);
+	cache = NULL;
 }
 
 int gwp_dns_ctx_init(struct gwp_dns_ctx **ctx_p, const struct gwp_dns_cfg *cfg)
@@ -827,6 +711,7 @@ int gwp_dns_ctx_init(struct gwp_dns_ctx **ctx_p, const struct gwp_dns_cfg *cfg)
 	ctx->head = NULL;
 	ctx->tail = NULL;
 	ctx->should_stop = false;
+	ctx->last_scan = time(NULL);
 	r = init_workers(ctx);
 	if (r)
 		goto out_free_cache;
