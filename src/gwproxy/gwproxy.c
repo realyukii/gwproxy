@@ -916,7 +916,7 @@ static int expand_conn_slot(struct gwp_wrk *w)
 }
 
 __hot
-static struct gwp_conn_pair *alloc_conn_pair(struct gwp_wrk *w)
+struct gwp_conn_pair *gwp_alloc_conn_pair(struct gwp_wrk *w)
 {
 	struct gwp_conn_slot *gcs = &w->conn_slot;
 	struct gwp_ctx *ctx = w->ctx;
