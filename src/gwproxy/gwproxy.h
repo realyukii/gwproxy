@@ -115,8 +115,14 @@ struct gwp_wrk {
 	pthread_t		thread;
 };
 
+enum {
+	GWP_EV_EPOLL,
+	GWP_EV_IO_URING
+};
+
 struct gwp_ctx {
 	volatile bool			stop;
+	uint8_t				ev_used;
 	struct log_handle		lh;
 	struct gwp_wrk			*workers;
 	struct gwp_sockaddr		target_addr;

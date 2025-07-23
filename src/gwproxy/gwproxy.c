@@ -762,6 +762,30 @@ static void gwp_ctx_free_dns(struct gwp_ctx *ctx)
 	pr_dbg(&ctx->lh, "DNS context freed");
 }
 
+static int gwp_ctx_parse_ev(struct gwp_ctx *ctx)
+{
+	const char *ev = ctx->cfg.event_loop;
+
+	if (!ev || !*ev) {
+		ctx->ev_used = GWP_EV_EPOLL;
+		pr_dbg(&ctx->lh, "Using default event loop: epoll");
+		return 0;
+	}
+
+	if (!strcmp(ev, "epoll")) {
+		ctx->ev_used = GWP_EV_EPOLL;
+		pr_dbg(&ctx->lh, "Using event loop: epoll");
+	} else if (!strcmp(ev, "io_uring") || !strcmp(ev, "iou")) {
+		ctx->ev_used = GWP_EV_IO_URING;
+		pr_dbg(&ctx->lh, "Using event loop: io_uring");
+	} else {
+		pr_err(&ctx->lh, "Unknown event loop '%s'", ev);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 __cold
 static int gwp_ctx_init(struct gwp_ctx *ctx)
 {
@@ -770,6 +794,10 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 	r = gwp_ctx_init_log(ctx);
 	if (r < 0)
 		return r;
+
+	r = gwp_ctx_parse_ev(ctx);
+	if (r < 0)
+		goto out_free_log;
 
 	if (!ctx->cfg.as_socks5) {
 		const char *t = ctx->cfg.target;
