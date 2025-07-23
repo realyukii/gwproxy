@@ -115,29 +115,16 @@ struct gwp_wrk {
 	pthread_t		thread;
 };
 
-struct gwp_socks5_user {
-	char	*u, *p;
-	uint8_t	ulen, plen;
-};
-
-struct gwp_socks5_auth {
-	FILE			*handle;
-	struct gwp_socks5_user	*users;
-	int			ino_fd;
-	size_t			nr;
-	size_t			cap;
-	pthread_rwlock_t	lock;
-};
-
 struct gwp_ctx {
 	volatile bool			stop;
 	struct log_handle		lh;
 	struct gwp_wrk			*workers;
-	struct gwp_socks5_auth		*s5auth;
 	struct gwp_sockaddr		target_addr;
 	struct gwp_socks5_ctx		*socks5;
 	struct gwp_dns_ctx		*dns;
 	struct gwp_cfg			cfg;
+	int				ino_fd;
+	char				*ino_buf;
 	_Atomic(int32_t)		nr_fd_closed;
 	_Atomic(int32_t)		nr_accept_stopped;
 };

@@ -538,10 +538,10 @@ static int gwp_ctx_init_thread_epoll(struct gwp_wrk *w)
 	if (unlikely(r))
 		goto out_free_events;
 
-	if (w->idx == 0 && ctx->s5auth) {
+	if (w->idx == 0 && (ctx->ino_fd >= 0)) {
 		ev.events = EPOLLIN;
 		ev.data.u64 = EV_BIT_SOCKS5_AUTH_FILE;
-		r = __sys_epoll_ctl(ep_fd, EPOLL_CTL_ADD, ctx->s5auth->ino_fd, &ev);
+		r = __sys_epoll_ctl(ep_fd, EPOLL_CTL_ADD, ctx->ino_fd, &ev);
 		if (unlikely(r))
 			goto out_free_events;
 	}
@@ -721,205 +721,6 @@ static void gwp_ctx_free_threads(struct gwp_ctx *ctx)
 	ctx->workers = NULL;
 }
 
-static int gwp_load_s5auth_add_user(struct gwp_socks5_auth *s5a,
-				    const char *line)
-{
-	char *u, *p;
-
-	if (s5a->nr >= s5a->cap) {
-		size_t new_cap = s5a->cap ? s5a->cap * 2 : 16;
-		struct gwp_socks5_user *new_users;
-		new_users = realloc(s5a->users, new_cap * sizeof(*new_users));
-		if (!new_users)
-			return -ENOMEM;
-		s5a->users = new_users;
-		s5a->cap = new_cap;
-	}
-
-	u = strdup(line);
-	if (!u)
-		return -ENOMEM;
-
-	p = strchr(u, ':');
-	if (p)
-		*p++ = '\0';
-
-	if (unlikely(strlen(u) > 255)) {
-		free(u);
-		return -EINVAL;
-	}
-
-	if (unlikely(p && strlen(p) > 255)) {
-		free(u);
-		return -EINVAL;
-	}
-
-	s5a->users[s5a->nr].u = u;
-	s5a->users[s5a->nr].p = p;
-	s5a->users[s5a->nr].ulen = strlen(u);
-	s5a->users[s5a->nr].plen = p ? strlen(p) : 0;
-	s5a->nr++;
-	return 0;
-}
-
-static void gwp_load_s5auth_free_users(struct gwp_socks5_auth *s5a)
-{
-	size_t i;
-
-	if (!s5a->users)
-		return;
-
-	for (i = 0; i < s5a->nr; i++)
-		free(s5a->users[i].u);
-
-	free(s5a->users);
-	s5a->users = NULL;
-	s5a->nr = 0;
-	s5a->cap = 0;
-}
-
-static bool is_space(unsigned char c)
-{
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r';
-}
-
-static char *trim_str(char *str)
-{
-	char *end;
-
-	while (is_space((unsigned char)*str))
-		str++;
-
-	end = str + strlen(str) - 1;
-	while (end > str && is_space((unsigned char)*end))
-		end--;
-
-	end[1] = '\0';
-	return str;
-}
-
-__cold
-static int gwp_load_s5auth(struct gwp_ctx *ctx)
-{
-	const char *s5a_file = ctx->cfg.socks5_auth_file;
-	struct gwp_socks5_auth *s5a = ctx->s5auth;
-	char buf[512], *t;
-	int r = 0;
-	size_t l;
-
-	pr_info(&ctx->lh, "Loading SOCKS5 authentication from '%s'", s5a_file);
-	pthread_rwlock_wrlock(&s5a->lock);
-	gwp_load_s5auth_free_users(s5a);
-	while (1) {
-		t = fgets(buf, sizeof(buf), s5a->handle);
-		if (!t)
-			break;
-
-		t = trim_str(t);
-		l = strlen(t);
-		if (!l)
-			continue;
-
-		r = gwp_load_s5auth_add_user(s5a, t);
-		if (r)
-			pr_err(&ctx->lh, "Failed to add user: %s (line='%s')",
-				t, strerror(-r));
-	}
-	rewind(s5a->handle);
-	l = s5a->nr;
-	pthread_rwlock_unlock(&s5a->lock);
-	pr_info(&ctx->lh, "Loaded %zu users from '%s'", l, s5a_file);
-	return 0;
-}
-
-__cold
-static int gwp_ctx_init_s5auth(struct gwp_ctx *ctx)
-{
-	const char *s5a_file = ctx->cfg.socks5_auth_file;
-	struct gwp_socks5_auth *s5a;
-	int r;
-
-	if (!ctx->cfg.as_socks5 || !s5a_file || !*s5a_file) {
-		ctx->s5auth = NULL;
-		return 0;
-	}
-
-	s5a = calloc(1, sizeof(*s5a));
-	if (!s5a)
-		return -ENOMEM;
-
-	r = pthread_rwlock_init(&s5a->lock, NULL);
-	if (r) {
-		r = -r;
-		pr_err(&ctx->lh, "Failed to initialize SOCKS5 auth lock: %s",
-			strerror(r));
-		goto out_free_s5a;
-	}
-
-	s5a->handle = fopen(s5a_file, "rb");
-	if (!s5a->handle) {
-		r = -errno;
-		pr_err(&ctx->lh, "Failed to open SOCKS5 auth file '%s': %s",
-			s5a_file, strerror(-r));
-		goto out_destroy_lock;
-	}
-
-	s5a->ino_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-	if (s5a->ino_fd < 0) {
-		r = -errno;
-		pr_err(&ctx->lh, "Failed to create inotify instance: %s",
-		       strerror(-r));
-		goto out_fclose_handle;
-	}
-
-	r = inotify_add_watch(s5a->ino_fd, s5a_file, IN_CLOSE_WRITE | IN_DELETE);
-	if (r < 0) {
-		r = -errno;
-		pr_err(&ctx->lh, "Failed to add inotify watch for '%s': %s",
-		       s5a_file, strerror(-r));
-		goto out_close_ino_fd;
-	}
-
-	ctx->s5auth = s5a;
-	r = gwp_load_s5auth(ctx);
-	if (r < 0) {
-		free(ctx->s5auth->users);
-		ctx->s5auth->users = NULL;
-		pr_err(&ctx->lh, "Failed to load SOCKS5 authentication: %s",
-		       strerror(-r));
-		goto out_close_ino_fd;
-	}
-
-	return 0;
-
-out_close_ino_fd:
-	__sys_close(s5a->ino_fd);
-out_fclose_handle:
-	fclose(s5a->handle);
-out_destroy_lock:
-	pthread_rwlock_destroy(&s5a->lock);
-out_free_s5a:
-	free(s5a);
-	ctx->s5auth = NULL;
-	return r;
-}
-
-__cold
-static void gwp_ctx_free_s5auth(struct gwp_ctx *ctx)
-{
-	struct gwp_socks5_auth *s5a = ctx->s5auth;
-
-	if (!s5a)
-		return;
-
-	gwp_load_s5auth_free_users(s5a);
-	__sys_close(s5a->ino_fd);
-	fclose(s5a->handle);
-	pthread_rwlock_destroy(&s5a->lock);
-	free(s5a);
-	ctx->s5auth = NULL;
-}
-
 static int gwp_ctx_init_socks5(struct gwp_ctx *ctx)
 {
 	struct gwp_cfg *cfg = &ctx->cfg;
@@ -928,6 +729,7 @@ static int gwp_ctx_init_socks5(struct gwp_ctx *ctx)
 
 	if (!cfg->as_socks5) {
 		ctx->socks5 = NULL;
+		ctx->ino_fd = -1;
 		return 0;
 	}
 
@@ -941,7 +743,48 @@ static int gwp_ctx_init_socks5(struct gwp_ctx *ctx)
 		return r;
 	}
 
+	if (!s5cfg.auth_file || !*s5cfg.auth_file) {
+		pr_dbg(&ctx->lh, "SOCKS5 context initialized without auth file");
+		ctx->ino_buf = NULL;
+		ctx->ino_fd = -1;
+		return 0;
+	}
+
+	r = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+	if (r < 0) {
+		pr_err(&ctx->lh, "Failed to initialize inotify: %s", strerror(-r));
+		goto out_err;
+	}
+
+	pr_dbg(&ctx->lh, "Inotify file descriptor initialized (fd=%d)", r);
+
+	ctx->ino_fd = r;
+	r = inotify_add_watch(ctx->ino_fd, cfg->socks5_auth_file,
+			      IN_DELETE | IN_CLOSE_WRITE);
+	if (r < 0) {
+		pr_err(&ctx->lh, "Failed to add inotify watch: %s", strerror(-r));
+		goto out_err;
+	}
+
+	pr_dbg(&ctx->lh, "Inotify watch added for '%s' (wd=%d)", cfg->socks5_auth_file, r);
+
+	ctx->ino_buf = malloc(sizeof(struct inotify_event) + NAME_MAX + 1);
+	if (!ctx->ino_buf) {
+		pr_err(&ctx->lh, "Failed to allocate inotify buffer: %s", strerror(ENOMEM));
+		r = -ENOMEM;
+		goto out_err;
+	}
+
 	return 0;
+
+out_err:
+	gwp_socks5_ctx_free(ctx->socks5);
+	ctx->socks5 = NULL;
+	if (ctx->ino_fd >= 0) {
+		__sys_close(ctx->ino_fd);
+		ctx->ino_fd = -1;
+	}
+	return r;
 }
 
 static void gwp_ctx_free_socks5(struct gwp_ctx *ctx)
@@ -952,6 +795,18 @@ static void gwp_ctx_free_socks5(struct gwp_ctx *ctx)
 	gwp_socks5_ctx_free(ctx->socks5);
 	ctx->socks5 = NULL;
 	pr_dbg(&ctx->lh, "SOCKS5 context freed");
+
+	if (ctx->ino_fd >= 0) {
+		__sys_close(ctx->ino_fd);
+		ctx->ino_fd = -1;
+		pr_dbg(&ctx->lh, "Inotify file descriptor closed");
+	}
+
+	if (ctx->ino_buf) {
+		free(ctx->ino_buf);
+		ctx->ino_buf = NULL;
+		pr_dbg(&ctx->lh, "Inotify buffer freed");
+	}
 }
 
 static int gwp_ctx_init_dns(struct gwp_ctx *ctx)
@@ -997,18 +852,12 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 	if (r < 0)
 		return r;
 
-	r = gwp_ctx_init_s5auth(ctx);
-	if (r < 0) {
-		pr_err(&ctx->lh, "Failed to init SOCKS5 authentication: %s", strerror(-r));
-		goto out_free_log;
-	}
-
 	if (!ctx->cfg.as_socks5) {
 		const char *t = ctx->cfg.target;
 		r = convert_str_to_ssaddr(t, &ctx->target_addr);
 		if (r) {
 			pr_err(&ctx->lh, "Invalid target address '%s'", t);
-			goto out_free_s5auth;
+			goto out_free_log;
 		}
 	}
 
@@ -1017,7 +866,7 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 
 	r = gwp_ctx_init_socks5(ctx);
 	if (r < 0)
-		goto out_free_s5auth;
+		goto out_free_log;
 
 	r = gwp_ctx_init_dns(ctx);
 	if (r < 0)
@@ -1035,8 +884,6 @@ out_free_dns:
 	gwp_ctx_free_dns(ctx);
 out_free_socks5:
 	gwp_ctx_free_socks5(ctx);
-out_free_s5auth:
-	gwp_ctx_free_s5auth(ctx);
 out_free_log:
 	gwp_ctx_free_log(ctx);
 	return r;
@@ -1069,7 +916,6 @@ static void gwp_ctx_free(struct gwp_ctx *ctx)
 	gwp_ctx_stop(ctx);
 	gwp_ctx_free_threads(ctx);
 	gwp_ctx_free_dns(ctx);
-	gwp_ctx_free_s5auth(ctx);
 	gwp_ctx_free_socks5(ctx);
 	gwp_ctx_free_log(ctx);
 }
@@ -2267,21 +2113,24 @@ static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 
 static int handle_ev_socks5_auth_file(struct gwp_wrk *w)
 {
-	char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
-	struct gwp_ctx *ctx = w->ctx;
+	static const size_t l = sizeof(struct inotify_event) + NAME_MAX + 1;
 	ssize_t r;
 
-	assert(ctx->cfg.as_socks5);
-	assert(ctx->s5auth);
+	assert(w->ctx->cfg.as_socks5);
+	assert(w->ctx->socks5);
 
-	r = __sys_read(ctx->s5auth->ino_fd, buf, sizeof(buf));
+	r = __sys_read(w->ctx->ino_fd, w->ctx->ino_buf, l);
 	if (unlikely(r < 0)) {
 		if (r == -EINTR || r == -EAGAIN)
 			return 0;
+
+		pr_err(&w->ctx->lh, "Failed to read inotify event: %s", strerror(-r));
 		return r;
 	}
 
-	return gwp_load_s5auth(ctx);
+	gwp_socks5_auth_reload(w->ctx->socks5);
+	pr_info(&w->ctx->lh, "Reloaded SOCKS5 authentication file");
+	return 0;
 }
 
 static bool is_ev_bit_conn_pair(uint64_t ev_bit)
