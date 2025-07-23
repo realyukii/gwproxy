@@ -894,6 +894,27 @@ static void free_conn(struct gwp_conn *conn)
 	conn->ep_mask = 0;
 }
 
+static int expand_conn_slot(struct gwp_wrk *w)
+{
+	struct gwp_conn_slot *gcs = &w->conn_slot;
+	struct gwp_ctx *ctx = w->ctx;
+
+	if (gcs->nr >= gcs->cap) {
+		size_t new_cap = gcs->cap ? gcs->cap * 2 : 16;
+		struct gwp_conn_pair **new_pairs;
+
+		new_pairs = realloc(gcs->pairs, new_cap * sizeof(*new_pairs));
+		if (!new_pairs)
+			return -ENOMEM;
+
+		gcs->pairs = new_pairs;
+		gcs->cap = new_cap;
+		pr_dbg(&ctx->lh, "Increased connection slot capacity to %zu", gcs->cap);
+	}
+
+	return 0;
+}
+
 __hot
 static struct gwp_conn_pair *alloc_conn_pair(struct gwp_wrk *w)
 {
@@ -903,18 +924,9 @@ static struct gwp_conn_pair *alloc_conn_pair(struct gwp_wrk *w)
 	struct gwp_conn_pair *gcp;
 	int r;
 
-	if (gcs->nr >= gcs->cap) {
-		struct gwp_conn_pair **new_pairs;
-		size_t new_cap = gcs->cap + 4;
-
-		new_pairs = realloc(gcs->pairs, new_cap * sizeof(*new_pairs));
-		if (!new_pairs)
-			return NULL;
-
-		gcs->pairs = new_pairs;
-		gcs->cap = new_cap;
-		pr_dbg(&ctx->lh, "Increased connection slot capacity to %zu", gcs->cap);
-	}
+	r = expand_conn_slot(w);
+	if (unlikely(r))
+		return NULL;
 
 	gcp = calloc(1, sizeof(*gcp));
 	if (!gcp)
