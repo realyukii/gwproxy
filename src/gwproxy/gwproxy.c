@@ -2202,14 +2202,11 @@ static int fish_events(struct gwp_wrk *w)
 	return r;
 }
 
-noinline
-static void *gwp_ctx_thread_entry(void *arg)
+static int gwp_ctx_thread_entry_epoll(struct gwp_wrk *w)
 {
-	struct gwp_wrk *w = arg;
 	struct gwp_ctx *ctx = w->ctx;
 	int r = 0;
 
-	pr_info(&ctx->lh, "Worker %u started", w->idx);
 	while (!ctx->stop) {
 		r = fish_events(w);
 		if (unlikely(r < 0))
@@ -2220,6 +2217,18 @@ static void *gwp_ctx_thread_entry(void *arg)
 			break;
 	}
 
+	return r;
+}
+
+noinline
+static void *gwp_ctx_thread_entry(void *arg)
+{
+	struct gwp_wrk *w = arg;
+	struct gwp_ctx *ctx = w->ctx;
+	int r;
+
+	pr_info(&ctx->lh, "Worker %u started", w->idx);
+	r = gwp_ctx_thread_entry_epoll(w);
 	ctx->stop = true;
 	gwp_ctx_signal_all_workers(ctx);
 	pr_info(&ctx->lh, "Worker %u stopped", w->idx);
