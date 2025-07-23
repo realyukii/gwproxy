@@ -135,4 +135,9 @@ struct gwp_ctx {
 	_Atomic(int32_t)		nr_accept_stopped;
 };
 
+/*
+ * TODO(ammarfaizi2): Once epoll is further migrated, remove this.
+ */
+int gwp_ctx_handle_event_epoll(struct gwp_wrk *w, struct epoll_event *ev);
+
 #endif /* #ifndef GWPROXY_H */

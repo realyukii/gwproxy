@@ -2117,7 +2117,10 @@ static bool is_ev_bit_conn_pair(uint64_t ev_bit)
 	return !!(ev_bit & conn_pair_ev_bit);
 }
 
-static int handle_event(struct gwp_wrk *w, struct epoll_event *ev)
+/*
+ * TODO(ammarfaizi2): Once epoll is further migrated, remove this.
+ */
+int gwp_ctx_handle_event_epoll(struct gwp_wrk *w, struct epoll_event *ev)
 {
 	uint64_t ev_bit;
 	void *udata;
@@ -2160,61 +2163,6 @@ static int handle_event(struct gwp_wrk *w, struct epoll_event *ev)
 	if (r && is_ev_bit_conn_pair(ev_bit)) {
 		struct gwp_conn_pair *gcp = udata;
 		r = free_conn_pair(w, gcp);
-	}
-
-	return r;
-}
-
-static int handle_events(struct gwp_wrk *w, int nr_events)
-{
-	struct epoll_event *events = w->events;
-	struct gwp_ctx *ctx = w->ctx;
-	int i, r = 0;
-
-	for (i = 0; i < nr_events; i++) {
-		if (unlikely(ctx->stop))
-			break;
-
-		r = handle_event(w, &events[i]);
-		if (unlikely(r < 0))
-			break;
-
-		if (w->ev_need_reload)
-			break;
-	}
-
-	return r;
-}
-
-static int fish_events(struct gwp_wrk *w)
-{
-	int r;
-
-	w->ev_need_reload = false;
-	r = __sys_epoll_wait(w->ep_fd, w->events, w->evsz, -1);
-	if (unlikely(r < 0)) {
-		if (r != -EINTR)
-			pr_err(&w->ctx->lh, "epoll_wait failed: %s", strerror(-r));
-		else
-			r = 0;
-	}
-
-	return r;
-}
-
-static int gwp_ctx_thread_entry_epoll(struct gwp_wrk *w)
-{
-	struct gwp_ctx *ctx = w->ctx;
-	int r = 0;
-
-	while (!ctx->stop) {
-		r = fish_events(w);
-		if (unlikely(r < 0))
-			break;
-
-		r = handle_events(w, r);
-		if (unlikely(r < 0))
-			break;
 	}
 
 	return r;

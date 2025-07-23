@@ -5,6 +5,12 @@
 #include <gwproxy/ev/epoll.h>
 #include <gwproxy/common.h>
 #include <stdlib.h>
+#include <inttypes.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <errno.h>
+#include <string.h>
+#include <assert.h>
 
 __cold
 int gwp_ctx_init_thread_epoll(struct gwp_wrk *w)
@@ -97,4 +103,59 @@ void gwp_ctx_free_thread_epoll(struct gwp_wrk *w)
 
 	free(w->events);
 	w->events = NULL;
+}
+
+static int handle_events(struct gwp_wrk *w, int nr_events)
+{
+	struct epoll_event *events = w->events;
+	struct gwp_ctx *ctx = w->ctx;
+	int i, r = 0;
+
+	for (i = 0; i < nr_events; i++) {
+		if (unlikely(ctx->stop))
+			break;
+
+		r = gwp_ctx_handle_event_epoll(w, &events[i]);
+		if (unlikely(r < 0))
+			break;
+
+		if (w->ev_need_reload)
+			break;
+	}
+
+	return r;
+}
+
+static int fish_events(struct gwp_wrk *w)
+{
+	int r;
+
+	w->ev_need_reload = false;
+	r = __sys_epoll_wait(w->ep_fd, w->events, w->evsz, -1);
+	if (unlikely(r < 0)) {
+		if (r != -EINTR)
+			pr_err(&w->ctx->lh, "epoll_wait failed: %s", strerror(-r));
+		else
+			r = 0;
+	}
+
+	return r;
+}
+
+int gwp_ctx_thread_entry_epoll(struct gwp_wrk *w)
+{
+	struct gwp_ctx *ctx = w->ctx;
+	int r = 0;
+
+	while (!ctx->stop) {
+		r = fish_events(w);
+		if (unlikely(r < 0))
+			break;
+
+		r = handle_events(w, r);
+		if (unlikely(r < 0))
+			break;
+	}
+
+	return r;
 }
