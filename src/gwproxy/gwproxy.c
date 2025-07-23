@@ -1033,6 +1033,39 @@ static int rearm_accept(struct gwp_wrk *w, int nr_fd_closed)
 	return 0;
 }
 
+static int shrink_conn_slot(struct gwp_wrk *w)
+{
+	struct gwp_conn_slot *gcs = &w->conn_slot;
+	struct gwp_conn_pair **new_pairs;
+	struct gwp_ctx *ctx = w->ctx;
+	size_t new_cap;
+
+	if (!gcs->pairs)
+		return 0;
+
+	if (!gcs->nr) {
+		free(gcs->pairs);
+		gcs->pairs = NULL;
+		gcs->cap = 0;
+		pr_dbg(&ctx->lh, "Connection slot capacity shrunk to 0");
+		return 0;
+	}
+
+	if (gcs->cap <= 16 || (gcs->cap - gcs->nr) < 16)
+		return 0;
+
+	new_cap = gcs->nr;
+	new_pairs = realloc(gcs->pairs, new_cap * sizeof(*new_pairs));
+	if (!new_pairs) {
+		pr_err(&ctx->lh, "Failed to shrink connection slot!");
+		return -ENOMEM;
+	}
+	gcs->pairs = new_pairs;
+	gcs->cap = new_cap;
+	pr_dbg(&ctx->lh, "Connection slot capacity shrunk to %zu", gcs->cap);
+	return 0;
+}
+
 __hot
 static int free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
@@ -1087,24 +1120,7 @@ static int free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	free_conn(&gcp->client);
 	free(gcp);
 
-	if (!gcs->nr) {
-		free(gcs->pairs);
-		gcs->pairs = NULL;
-		gcs->cap = 0;
-		pr_dbg(&ctx->lh, "Decreased connection slot capacity to 0");
-	} else if ((gcs->cap - gcs->nr) >= 16) {
-		struct gwp_conn_pair **new_pairs;
-		size_t new_cap = gcs->nr;
-
-		new_pairs = realloc(gcs->pairs, new_cap * sizeof(*new_pairs));
-		if (new_pairs) {
-			gcs->pairs = new_pairs;
-			gcs->cap = new_cap;
-			pr_dbg(&ctx->lh, "Decreased connection slot capacity to %zu",
-				gcs->cap);
-		}
-	}
-
+	shrink_conn_slot(w);
 	if (unlikely(w->accept_is_stopped)) {
 		int x;
 		/*
