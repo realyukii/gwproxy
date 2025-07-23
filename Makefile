@@ -31,7 +31,7 @@ ifeq ($(STATIC),1)
 endif
 
 GWPROXY_TARGET = gwproxy
-GWPROXY_CC_SOURCES = $(GWPROXY_DIR)/gwproxy.c
+GWPROXY_CC_SOURCES = $(GWPROXY_DIR)/gwproxy.c $(GWPROXY_DIR)/log.c
 GWPROXY_OBJECTS = $(GWPROXY_CC_SOURCES:%.c=%.c.o)
 
 LIBGWPSOCKS5_TARGET = libgwpsocks5.so

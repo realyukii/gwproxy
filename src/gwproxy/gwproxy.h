@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * gwproxy - A simple TCP proxy server.
- *
  * Copyright (C) 2025 Ammar Faizi <ammarfaizi2@gnuweeb.org>
  */
 #ifndef GWPROXY_H
@@ -14,6 +12,7 @@
 #include <gwproxy/syscall.h>
 #include <gwproxy/socks5.h>
 #include <gwproxy/dns.h>
+#include <gwproxy/log.h>
 
 struct gwp_cfg {
 	const char	*event_loop;
@@ -132,7 +131,7 @@ struct gwp_socks5_auth {
 
 struct gwp_ctx {
 	volatile bool			stop;
-	FILE				*log_file;
+	struct log_handle		lh;
 	struct gwp_wrk			*workers;
 	struct gwp_socks5_auth		*s5auth;
 	struct gwp_sockaddr		target_addr;

@@ -5,6 +5,9 @@
  * Copyright (C) 2025 Ammar Faizi <ammarfaizi2@gnuweeb.org>
  */
 #include <gwproxy/gwproxy.h>
+#include <gwproxy/common.h>
+#include <gwproxy/log.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,35 +37,6 @@
 #include <sys/timerfd.h>
 #include <sys/resource.h>
 #include <sys/inotify.h>
-
-#ifndef likely
-#define likely(x)	__builtin_expect(!!(x), 1)
-#endif
-#ifndef unlikely
-#define unlikely(x)	__builtin_expect(!!(x), 0)
-#endif
-
-#ifndef __cold
-#define __cold		__attribute__((__cold__))
-#endif
-
-#ifndef __hot
-#define __hot		__attribute__((__hot__))
-#endif
-
-#ifndef noinline
-#define noinline	__attribute__((__noinline__))
-#endif
-
-#ifdef __CHECKER__
-#define __must_hold(x) __attribute__((context(x,1,1)))
-#define __acquires(x)  __attribute__((context(x,0,1)))
-#define __releases(x)  __attribute__((context(x,1,0)))
-#else
-#define __must_hold(x)
-#define __acquires(x)
-#define __releases(x)
-#endif
 
 static const struct option long_opts[] = {
 	{ "help",		no_argument,		NULL,	'h' },
@@ -278,87 +252,6 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 	return 0;
 }
 
-__hot
-__attribute__((__format__(printf, 3, 4)))
-static void __pr_log(FILE *handle, int level, const char *fmt, ...)
-{
-	char loc_buf[4096], *tmp, *pb, time_buf[64];
-	va_list ap, ap2;
-	const char *ls;
-	struct tm tm;
-	time_t now;
-	int r;
-
-	if (!handle)
-		return;
-
-	switch (level) {
-	case 1:  ls = "error "; break;
-	case 2:  ls = "warn  "; break;
-	case 3:  ls = "info  "; break;
-	case 4:  ls = "debug "; break;
-	default: ls = "????? "; break;
-	}
-
-	va_start(ap, fmt);
-	va_copy(ap2, ap);
-	r = vsnprintf(loc_buf, sizeof(loc_buf), fmt, ap);
-	if (unlikely((size_t)r >= sizeof(loc_buf))) {
-		tmp = malloc(r + 1);
-		if (!tmp)
-			goto out;
-
-		vsnprintf(tmp, r + 1, fmt, ap2);
-		pb = tmp;
-	} else {
-		pb = loc_buf;
-	}
-
-	now = time(NULL);
-	if (likely(localtime_r(&now, &tm)))
-		strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm);
-	else
-		time_buf[0] = '\0';
-
-	fprintf(handle, "[%s][%s][%08d]: %s\n", time_buf, ls, gettid(), pb);
-	if (unlikely(pb != loc_buf))
-		free(pb);
-out:
-	va_end(ap2);
-	va_end(ap);
-}
-
-#ifndef GWP_STATIC_LOG_LEVEL
-#define GWP_STATIC_LOG_LEVEL 4
-#endif
-
-#define pr_log(CTX, LEVEL, FMT, ...)		\
-do {						\
-	struct gwp_ctx *__ctx = (CTX);		\
-	int __level = (LEVEL);			\
-	if (__level > GWP_STATIC_LOG_LEVEL)	\
-		break;				\
-	if (__level > __ctx->cfg.log_level)	\
-		break;				\
-	if (!__ctx->log_file)			\
-		break;				\
-	__pr_log(__ctx->log_file, __level, FMT, ##__VA_ARGS__);	\
-} while (0)
-
-#define pr_err(CTX, FMT, ...)	\
-	pr_log((CTX), 1, FMT, ##__VA_ARGS__)
-
-#define pr_warn(CTX, FMT, ...)	\
-	pr_log((CTX), 2, FMT, ##__VA_ARGS__)
-
-#define pr_info(CTX, FMT, ...)	\
-	pr_log((CTX), 3, FMT, ##__VA_ARGS__)
-
-#define pr_dbg(CTX, FMT, ...)	\
-	pr_log((CTX), 4, FMT, ##__VA_ARGS__)
-
-
-
 #define FULL_ADDRSTRLEN (INET6_ADDRSTRLEN + sizeof(":65535[]") - 1)
 
 static inline ssize_t gwp_eventfd_write(int fd, uint64_t val)
@@ -484,31 +377,32 @@ static int gwp_ctx_init_log(struct gwp_ctx *ctx)
 	int r = 0;
 
 	if (!strcmp("/dev/stdout", cfg->log_file)) {
-		ctx->log_file = stdout;
+		ctx->lh.handle = stdout;
 	} else if (!strcmp("/dev/stderr", cfg->log_file)) {
-		ctx->log_file = stderr;
+		ctx->lh.handle = stderr;
 	} else if (!*cfg->log_file) {
-		ctx->log_file = NULL;
+		ctx->lh.handle = NULL;
 	} else {
-		ctx->log_file = fopen(cfg->log_file, "ab");
-		if (!ctx->log_file) {
+		ctx->lh.handle = fopen(cfg->log_file, "ab");
+		if (!ctx->lh.handle) {
 			r = -errno;
-			pr_err(ctx, "Failed to open log file '%s': %s",
+			pr_err(&ctx->lh, "Failed to open log file '%s': %s",
 				cfg->log_file, strerror(-r));
 		}
 	}
 
+	ctx->lh.level = ctx->cfg.log_level;
 	return r;
 }
 
 __cold
 static void gwp_ctx_free_log(struct gwp_ctx *ctx)
 {
-	if (ctx->log_file &&
-	    ctx->log_file != stdout &&
-	    ctx->log_file != stderr) {
-		fclose(ctx->log_file);
-		ctx->log_file = NULL;
+	if (ctx->lh.handle &&
+	    ctx->lh.handle != stdout &&
+	    ctx->lh.handle != stderr) {
+		fclose(ctx->lh.handle);
+		ctx->lh.handle = NULL;
 	}
 }
 
@@ -521,13 +415,13 @@ static int gwp_ctx_init_pid_file(struct gwp_ctx *ctx)
 	f = fopen(ctx->cfg.pid_file, "wb");
 	if (!f) {
 		r = -errno;
-		pr_warn(ctx, "Failed to open PID file '%s': %s",
+		pr_warn(&ctx->lh, "Failed to open PID file '%s': %s",
 			ctx->cfg.pid_file, strerror(-r));
 		return r;
 	}
 
 	r = getpid();
-	pr_info(ctx, "Writing PID to '%s' (pid=%d)", ctx->cfg.pid_file, r);
+	pr_info(&ctx->lh, "Writing PID to '%s' (pid=%d)", ctx->cfg.pid_file, r);
 	fprintf(f, "%d\n", r);
 	fclose(f);
 	return 0;
@@ -548,13 +442,13 @@ static int gwp_ctx_init_thread_sock(struct gwp_wrk *w,
 	} else if (r == AF_INET6) {
 		slen = sizeof(struct sockaddr_in6);
 	} else {
-		pr_err(w->ctx, "Unsupported address family: %d", r);
+		pr_err(&w->ctx->lh, "Unsupported address family: %d", r);
 		return -EAFNOSUPPORT;
 	}
 
 	fd = __sys_socket(r, type, 0);
 	if (fd < 0) {
-		pr_err(w->ctx, "Failed to create socket: %s", strerror(-r));
+		pr_err(&w->ctx->lh, "Failed to create socket: %s", strerror(-r));
 		return r;
 	}
 
@@ -564,18 +458,18 @@ static int gwp_ctx_init_thread_sock(struct gwp_wrk *w,
 
 	r = __sys_bind(fd, (struct sockaddr *)ba, slen);
 	if (r < 0) {
-		pr_err(w->ctx, "Failed to bind socket: %s", strerror(-r));
+		pr_err(&w->ctx->lh, "Failed to bind socket: %s", strerror(-r));
 		goto out_close;
 	}
 
 	r = __sys_listen(fd, SOMAXCONN);
 	if (r < 0) {
-		pr_err(w->ctx, "Failed to listen on socket: %s", strerror(-r));
+		pr_err(&w->ctx->lh, "Failed to listen on socket: %s", strerror(-r));
 		goto out_close;
 	}
 
 	w->tcp_fd = fd;
-	pr_info(w->ctx, "Worker %u is listening on %s (fd=%d)", w->idx,
+	pr_info(&w->ctx->lh, "Worker %u is listening on %s (fd=%d)", w->idx,
 		cfg->bind, fd);
 	return 0;
 
@@ -590,7 +484,7 @@ static void gwp_ctx_free_thread_sock(struct gwp_wrk *w)
 {
 	if (w->tcp_fd >= 0) {
 		__sys_close(w->tcp_fd);
-		pr_dbg(w->ctx, "Worker %u socket closed (fd=%d)", w->idx,
+		pr_dbg(&w->ctx->lh, "Worker %u socket closed (fd=%d)", w->idx,
 			w->tcp_fd);
 		w->tcp_fd = -1;
 	}
@@ -606,7 +500,7 @@ static int gwp_ctx_init_thread_epoll(struct gwp_wrk *w)
 	ep_fd = __sys_epoll_create1(EPOLL_CLOEXEC);
 	if (ep_fd < 0) {
 		r = ep_fd;
-		pr_err(w->ctx, "Failed to create epoll instance: %s\n",
+		pr_err(&w->ctx->lh, "Failed to create epoll instance: %s\n",
 			strerror(-r));
 		return r;
 	}
@@ -614,7 +508,7 @@ static int gwp_ctx_init_thread_epoll(struct gwp_wrk *w)
 	ev_fd = __sys_eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 	if (ev_fd < 0) {
 		r = ev_fd;
-		pr_err(w->ctx, "Failed to create eventfd: %s\n", strerror(-r));
+		pr_err(&w->ctx->lh, "Failed to create eventfd: %s\n", strerror(-r));
 		goto out_close_ep_fd;
 	}
 
@@ -622,7 +516,7 @@ static int gwp_ctx_init_thread_epoll(struct gwp_wrk *w)
 	events = calloc(w->evsz, sizeof(*events));
 	if (!events) {
 		r = -ENOMEM;
-		pr_err(w->ctx, "Failed to allocate memory for events: %s\n",
+		pr_err(&w->ctx->lh, "Failed to allocate memory for events: %s\n",
 			strerror(-r));
 		goto out_close_ev_fd;
 	}
@@ -652,7 +546,7 @@ static int gwp_ctx_init_thread_epoll(struct gwp_wrk *w)
 			goto out_free_events;
 	}
 
-	pr_dbg(w->ctx, "Worker %u epoll (ep_fd=%d, ev_fd=%d)", w->idx,
+	pr_dbg(&w->ctx->lh, "Worker %u epoll (ep_fd=%d, ev_fd=%d)", w->idx,
 		ep_fd, ev_fd);
 	return 0;
 
@@ -672,14 +566,14 @@ static void gwp_ctx_free_thread_epoll(struct gwp_wrk *w)
 {
 	if (w->ev_fd >= 0) {
 		__sys_close(w->ev_fd);
-		pr_dbg(w->ctx, "Worker %u eventfd closed (fd=%d)", w->idx,
+		pr_dbg(&w->ctx->lh, "Worker %u eventfd closed (fd=%d)", w->idx,
 		       w->ev_fd);
 		w->ev_fd = -1;
 	}
 
 	if (w->ep_fd >= 0) {
 		__sys_close(w->ep_fd);
-		pr_dbg(w->ctx, "Worker %u epoll closed (fd=%d)", w->idx,
+		pr_dbg(&w->ctx->lh, "Worker %u epoll closed (fd=%d)", w->idx,
 		       w->ep_fd);
 		w->ep_fd = -1;
 	}
@@ -696,14 +590,14 @@ static int gwp_ctx_init_thread(struct gwp_wrk *w,
 
 	r = gwp_ctx_init_thread_sock(w, bind_addr);
 	if (r < 0) {
-		pr_err(w->ctx, "Failed to initialize thread socket: %s\n",
+		pr_err(&w->ctx->lh, "Failed to initialize thread socket: %s\n",
 		       strerror(-r));
 		return r;
 	}
 
 	r = gwp_ctx_init_thread_epoll(w);
 	if (r < 0) {
-		pr_err(w->ctx, "Failed to initialize epoll for worker %u: %s\n",
+		pr_err(&w->ctx->lh, "Failed to initialize epoll for worker %u: %s\n",
 			w->idx, strerror(-r));
 		goto out_free_sock;
 	}
@@ -719,7 +613,7 @@ static void free_conn(struct gwp_conn *conn);
 
 static void log_conn_pair_close(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
-	pr_info(w->ctx,
+	pr_info(&w->ctx->lh,
 		"Closing connection pair (idx=%u, cfd=%d, tfd=%d, ca=%s, ta=%s)",
 		gcp->idx, gcp->client.fd, gcp->target.fd,
 		ip_to_str(&gcp->client_addr),
@@ -777,13 +671,13 @@ static int gwp_ctx_init_threads(struct gwp_ctx *ctx)
 	int i, r;
 
 	if (cfg->nr_workers <= 0) {
-		pr_err(ctx, "Number of workers must be at least 1\n");
+		pr_err(&ctx->lh, "Number of workers must be at least 1\n");
 		return -EINVAL;
 	}
 
 	r = convert_str_to_ssaddr(cfg->bind, &bind_addr);
 	if (r) {
-		pr_err(ctx, "Invalid bind address '%s'\n", cfg->bind);
+		pr_err(&ctx->lh, "Invalid bind address '%s'\n", cfg->bind);
 		return r;
 	}
 
@@ -913,7 +807,7 @@ static int gwp_load_s5auth(struct gwp_ctx *ctx)
 	int r = 0;
 	size_t l;
 
-	pr_info(ctx, "Loading SOCKS5 authentication from '%s'", s5a_file);
+	pr_info(&ctx->lh, "Loading SOCKS5 authentication from '%s'", s5a_file);
 	pthread_rwlock_wrlock(&s5a->lock);
 	gwp_load_s5auth_free_users(s5a);
 	while (1) {
@@ -928,13 +822,13 @@ static int gwp_load_s5auth(struct gwp_ctx *ctx)
 
 		r = gwp_load_s5auth_add_user(s5a, t);
 		if (r)
-			pr_err(ctx, "Failed to add user: %s (line='%s')",
+			pr_err(&ctx->lh, "Failed to add user: %s (line='%s')",
 				t, strerror(-r));
 	}
 	rewind(s5a->handle);
 	l = s5a->nr;
 	pthread_rwlock_unlock(&s5a->lock);
-	pr_info(ctx, "Loaded %zu users from '%s'", l, s5a_file);
+	pr_info(&ctx->lh, "Loaded %zu users from '%s'", l, s5a_file);
 	return 0;
 }
 
@@ -957,7 +851,7 @@ static int gwp_ctx_init_s5auth(struct gwp_ctx *ctx)
 	r = pthread_rwlock_init(&s5a->lock, NULL);
 	if (r) {
 		r = -r;
-		pr_err(ctx, "Failed to initialize SOCKS5 auth lock: %s",
+		pr_err(&ctx->lh, "Failed to initialize SOCKS5 auth lock: %s",
 			strerror(r));
 		goto out_free_s5a;
 	}
@@ -965,7 +859,7 @@ static int gwp_ctx_init_s5auth(struct gwp_ctx *ctx)
 	s5a->handle = fopen(s5a_file, "rb");
 	if (!s5a->handle) {
 		r = -errno;
-		pr_err(ctx, "Failed to open SOCKS5 auth file '%s': %s",
+		pr_err(&ctx->lh, "Failed to open SOCKS5 auth file '%s': %s",
 			s5a_file, strerror(-r));
 		goto out_destroy_lock;
 	}
@@ -973,7 +867,7 @@ static int gwp_ctx_init_s5auth(struct gwp_ctx *ctx)
 	s5a->ino_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	if (s5a->ino_fd < 0) {
 		r = -errno;
-		pr_err(ctx, "Failed to create inotify instance: %s",
+		pr_err(&ctx->lh, "Failed to create inotify instance: %s",
 		       strerror(-r));
 		goto out_fclose_handle;
 	}
@@ -981,7 +875,7 @@ static int gwp_ctx_init_s5auth(struct gwp_ctx *ctx)
 	r = inotify_add_watch(s5a->ino_fd, s5a_file, IN_CLOSE_WRITE | IN_DELETE);
 	if (r < 0) {
 		r = -errno;
-		pr_err(ctx, "Failed to add inotify watch for '%s': %s",
+		pr_err(&ctx->lh, "Failed to add inotify watch for '%s': %s",
 		       s5a_file, strerror(-r));
 		goto out_close_ino_fd;
 	}
@@ -991,7 +885,7 @@ static int gwp_ctx_init_s5auth(struct gwp_ctx *ctx)
 	if (r < 0) {
 		free(ctx->s5auth->users);
 		ctx->s5auth->users = NULL;
-		pr_err(ctx, "Failed to load SOCKS5 authentication: %s",
+		pr_err(&ctx->lh, "Failed to load SOCKS5 authentication: %s",
 		       strerror(-r));
 		goto out_close_ino_fd;
 	}
@@ -1037,12 +931,12 @@ static int gwp_ctx_init_socks5(struct gwp_ctx *ctx)
 		return 0;
 	}
 
-	pr_dbg(ctx, "Initializing SOCKS5 context");
+	pr_dbg(&ctx->lh, "Initializing SOCKS5 context");
 	memset(&s5cfg, 0, sizeof(s5cfg));
 	s5cfg.auth_file = (char *)cfg->socks5_auth_file;
 	r = gwp_socks5_ctx_init(&ctx->socks5, &s5cfg);
 	if (r < 0) {
-		pr_err(ctx, "Failed to initialize SOCKS5 context: %s",
+		pr_err(&ctx->lh, "Failed to initialize SOCKS5 context: %s",
 			strerror(-r));
 		return r;
 	}
@@ -1057,7 +951,7 @@ static void gwp_ctx_free_socks5(struct gwp_ctx *ctx)
 
 	gwp_socks5_ctx_free(ctx->socks5);
 	ctx->socks5 = NULL;
-	pr_dbg(ctx, "SOCKS5 context freed");
+	pr_dbg(&ctx->lh, "SOCKS5 context freed");
 }
 
 static int gwp_ctx_init_dns(struct gwp_ctx *ctx)
@@ -1077,7 +971,7 @@ static int gwp_ctx_init_dns(struct gwp_ctx *ctx)
 
 	r = gwp_dns_ctx_init(&ctx->dns, &dns_cfg);
 	if (r < 0) {
-		pr_err(ctx, "Failed to initialize DNS context: %s", strerror(-r));
+		pr_err(&ctx->lh, "Failed to initialize DNS context: %s", strerror(-r));
 		return r;
 	}
 
@@ -1091,7 +985,7 @@ static void gwp_ctx_free_dns(struct gwp_ctx *ctx)
 
 	gwp_dns_ctx_free(ctx->dns);
 	ctx->dns = NULL;
-	pr_dbg(ctx, "DNS context freed");
+	pr_dbg(&ctx->lh, "DNS context freed");
 }
 
 __cold
@@ -1105,7 +999,7 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 
 	r = gwp_ctx_init_s5auth(ctx);
 	if (r < 0) {
-		pr_err(ctx, "Failed to init SOCKS5 authentication: %s", strerror(-r));
+		pr_err(&ctx->lh, "Failed to init SOCKS5 authentication: %s", strerror(-r));
 		goto out_free_log;
 	}
 
@@ -1113,7 +1007,7 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 		const char *t = ctx->cfg.target;
 		r = convert_str_to_ssaddr(t, &ctx->target_addr);
 		if (r) {
-			pr_err(ctx, "Invalid target address '%s'", t);
+			pr_err(&ctx->lh, "Invalid target address '%s'", t);
 			goto out_free_s5auth;
 		}
 	}
@@ -1131,7 +1025,7 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 
 	r = gwp_ctx_init_threads(ctx);
 	if (r < 0) {
-		pr_err(ctx, "Failed to initialize worker threads: %s", strerror(-r));
+		pr_err(&ctx->lh, "Failed to initialize worker threads: %s", strerror(-r));
 		goto out_free_dns;
 	}
 
@@ -1226,7 +1120,7 @@ static struct gwp_conn_pair *alloc_conn_pair(struct gwp_wrk *w)
 
 		gcs->pairs = new_pairs;
 		gcs->cap = new_cap;
-		pr_dbg(ctx, "Increased connection slot capacity to %zu", gcs->cap);
+		pr_dbg(&ctx->lh, "Increased connection slot capacity to %zu", gcs->cap);
 	}
 
 	gcp = calloc(1, sizeof(*gcp));
@@ -1252,7 +1146,7 @@ out_free_target_conn:
 	free_conn(&gcp->target);
 out_free_gcp:
 	free(gcp);
-	pr_err(ctx, "Failed to allocate connection pair: %s", strerror(-r));
+	pr_err(&ctx->lh, "Failed to allocate connection pair: %s", strerror(-r));
 	return NULL;
 }
 
@@ -1282,7 +1176,7 @@ static int rearm_accept(struct gwp_wrk *w, int nr_fd_closed)
 		return r;
 
 	w->accept_is_stopped = false;
-	pr_info(ctx,
+	pr_info(&ctx->lh,
 		"Rearmed main TCP socket for accepting new connections (tidx=%u, fd=%d)",
 		w->idx, w->tcp_fd);
 
@@ -1351,7 +1245,7 @@ static int free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		free(gcs->pairs);
 		gcs->pairs = NULL;
 		gcs->cap = 0;
-		pr_dbg(ctx, "Decreased connection slot capacity to 0");
+		pr_dbg(&ctx->lh, "Decreased connection slot capacity to 0");
 	} else if ((gcs->cap - gcs->nr) >= 16) {
 		struct gwp_conn_pair **new_pairs;
 		size_t new_cap = gcs->nr;
@@ -1360,7 +1254,7 @@ static int free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		if (new_pairs) {
 			gcs->pairs = new_pairs;
 			gcs->cap = new_cap;
-			pr_dbg(ctx, "Decreased connection slot capacity to %zu",
+			pr_dbg(&ctx->lh, "Decreased connection slot capacity to %zu",
 				gcs->cap);
 		}
 	}
@@ -1469,7 +1363,7 @@ static int create_timer(int fd, int sec, int nsec)
 static void log_conn_pair_created(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct gwp_ctx *ctx = w->ctx;
-	pr_info(ctx, "New connection pair created (idx=%u, cfd=%d, tfd=%d, ca=%s, ta=%s)",
+	pr_info(&ctx->lh, "New connection pair created (idx=%u, cfd=%d, tfd=%d, ca=%s, ta=%s)",
 		gcp->idx, gcp->client.fd, gcp->target.fd,
 		ip_to_str(&gcp->client_addr), ip_to_str(&gcp->target_addr));
 }
@@ -1501,7 +1395,7 @@ static int handle_new_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		fd = create_sock_target(w, &gcp->target_addr,
 					&gcp->is_target_alive);
 		if (unlikely(fd < 0)) {
-			pr_err(ctx, "Failed to create target socket: %s",
+			pr_err(&ctx->lh, "Failed to create target socket: %s",
 				strerror(-fd));
 			return fd;
 		}
@@ -1513,7 +1407,7 @@ static int handle_new_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	if (timeout > 0) {
 		timer_fd = create_timer(-1, timeout, 0);
 		if (unlikely(timer_fd < 0)) {
-			pr_err(ctx, "Failed to create connect timeout timer: %s",
+			pr_err(&ctx->lh, "Failed to create connect timeout timer: %s",
 				strerror(-timer_fd));
 			__sys_close(fd);
 			gwp_socks5_conn_free(gcp->s5_conn);
@@ -1587,7 +1481,7 @@ static int handle_accept_error(struct gwp_wrk *w, int e)
 		 *
 		 * See free_conn_pair() for more details.
 		 */
-		pr_warn(w->ctx, "Too many open files, stop accepting new connections");
+		pr_warn(&w->ctx->lh, "Too many open files, stop accepting new connections");
 		w->accept_is_stopped = true;
 		r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_DEL, w->tcp_fd, NULL);
 		if (unlikely(r))
@@ -1597,7 +1491,7 @@ static int handle_accept_error(struct gwp_wrk *w, int e)
 		return -EAGAIN;
 	}
 
-	pr_err(w->ctx, "Failed to accept new connection: %s", strerror(-e));
+	pr_err(&w->ctx->lh, "Failed to accept new connection: %s", strerror(-e));
 	return e;
 }
 
@@ -1613,7 +1507,7 @@ static int __handle_ev_accept(struct gwp_wrk *w)
 
 	gcp = alloc_conn_pair(w);
 	if (unlikely(!gcp)) {
-		pr_err(ctx, "Failed to allocate connection pair on accept");
+		pr_err(&ctx->lh, "Failed to allocate connection pair on accept");
 		return handle_accept_error(w, -ENOMEM);
 	}
 
@@ -1627,7 +1521,7 @@ static int __handle_ev_accept(struct gwp_wrk *w)
 
 	setup_sock_options(w, fd);
 	gcp->client.fd = fd;
-	pr_dbg(ctx, "New connection from %s (fd=%d)",
+	pr_dbg(&ctx->lh, "New connection from %s (fd=%d)",
 		ip_to_str(&gcp->client_addr), fd);
 
 	if (!ctx->cfg.as_socks5)
@@ -1655,7 +1549,7 @@ static int handle_ev_accept(struct gwp_wrk *w, struct epoll_event *ev)
 	int r;
 
 	if (unlikely(ev->events & EPOLLERR)) {
-		pr_err(w->ctx, "EPOLLERR on accept event");
+		pr_err(&w->ctx->lh, "EPOLLERR on accept event");
 		return -EIO;
 	}
 
@@ -1677,7 +1571,7 @@ static int handle_ev_eventfd(struct gwp_wrk *w, struct epoll_event *ev)
 	eventfd_t val;
 
 	if (unlikely(ev->events & EPOLLERR)) {
-		pr_err(w->ctx, "EPOLLERR on eventfd event");
+		pr_err(&w->ctx->lh, "EPOLLERR on eventfd event");
 		return -EIO;
 	}
 
@@ -1841,7 +1735,7 @@ static int get_local_addr(struct gwp_ctx *ctx, int fd,
 
 	r = __sys_getsockname(fd, &t.sa, &len);
 	if (r < 0) {
-		pr_err(ctx, "getsockname error: %s", strerror(-r));
+		pr_err(&ctx->lh, "getsockname error: %s", strerror(-r));
 		return r;
 	}
 
@@ -1857,7 +1751,7 @@ static int get_local_addr(struct gwp_ctx *ctx, int fd,
 		ba->port = ntohs(t.i6.sin6_port);
 		return 0;
 	default:
-		pr_err(ctx, "Unsupported address family %d for local socket",
+		pr_err(&ctx->lh, "Unsupported address family %d for local socket",
 			t.sa.sa_family);
 		return -EAFNOSUPPORT;
 	}
@@ -1931,16 +1825,16 @@ static int handle_ev_target_conn_result(struct gwp_wrk *w,
 
 	r = __sys_getsockopt(gcp->target.fd, SOL_SOCKET, SO_ERROR, &err, &l);
 	if (unlikely(r < 0)) {
-		pr_err(ctx, "getsockopt error: %s", strerror(-r));
+		pr_err(&ctx->lh, "getsockopt error: %s", strerror(-r));
 		goto out_conn_err;
 	}
 
 	if (likely(!err)) {
-		pr_info(ctx, "Target socket connected (fd=%d, idx=%u, ca=%s, ta=%s)",
+		pr_info(&ctx->lh, "Target socket connected (fd=%d, idx=%u, ca=%s, ta=%s)",
 			gcp->target.fd, gcp->idx, ip_to_str(&gcp->client_addr),
 			ip_to_str(&gcp->target_addr));
 	} else {
-		pr_err(ctx, "Target socket connect error: %s (fd=%d, idx=%u, ca=%s, ta=%s)",
+		pr_err(&ctx->lh, "Target socket connect error: %s (fd=%d, idx=%u, ca=%s, ta=%s)",
 			strerror(err), gcp->target.fd, gcp->idx,
 			ip_to_str(&gcp->client_addr),
 			ip_to_str(&gcp->target_addr));
@@ -1986,7 +1880,7 @@ static int handle_ev_target(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	int r;
 
 	if (unlikely(ev->events & EPOLLERR)) {
-		pr_err(w->ctx, "EPOLLERR on target connection event");
+		pr_err(&w->ctx->lh, "EPOLLERR on target connection event");
 		return -ECONNRESET;
 	}
 
@@ -2019,7 +1913,7 @@ static int handle_ev_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	int r;
 
 	if (unlikely(ev->events & EPOLLERR)) {
-		pr_err(w->ctx, "EPOLLERR on client connection event");
+		pr_err(&w->ctx->lh, "EPOLLERR on client connection event");
 		return -ECONNRESET;
 	}
 
@@ -2049,7 +1943,7 @@ static int handle_ev_timer(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	if (gcp->timer_fd < 0)
 		return 0;
 
-	pr_warn(ctx, "Connection timeout! (idx=%u, cfd=%d, tfd=%d, ca=%s, ta=%s)",
+	pr_warn(&ctx->lh, "Connection timeout! (idx=%u, cfd=%d, tfd=%d, ca=%s, ta=%s)",
 		gcp->idx, gcp->client.fd, gcp->target.fd,
 		ip_to_str(&gcp->client_addr), ip_to_str(&gcp->target_addr));
 
@@ -2069,7 +1963,7 @@ static int handle_socks5_connect_domain_async(struct gwp_wrk *w,
 
 	gde = gwp_dns_queue(dns, host, port);
 	if (unlikely(!gde)) {
-		pr_err(w->ctx, "Failed to allocate DNS entry for %s:%s", host, port);
+		pr_err(&w->ctx->lh, "Failed to allocate DNS entry for %s:%s", host, port);
 		return -ENOMEM;
 	}
 
@@ -2107,7 +2001,7 @@ static int socks5_prepare_target_addr_domain(struct gwp_wrk *w,
 		/*
 		 * Found the address in the DNS cache!
 		 */
-		pr_dbg(ctx, "Found %s:%s in DNS cache %s", host, portstr,
+		pr_dbg(&ctx->lh, "Found %s:%s in DNS cache %s", host, portstr,
 			ip_to_str(&gcp->target_addr));
 		return 0;
 	}
@@ -2169,7 +2063,7 @@ static int handle_socks5_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 
 	tfd = create_sock_target(w, &gcp->target_addr, &gcp->is_target_alive);
 	if (unlikely(tfd < 0)) {
-		pr_err(w->ctx, "Failed to create target socket: %s", strerror(-tfd));
+		pr_err(&w->ctx->lh, "Failed to create target socket: %s", strerror(-tfd));
 		return tfd;
 	}
 
@@ -2234,7 +2128,7 @@ static int handle_socks5_pollout(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	if (likely(!adj_epl_out(&gcp->target, &gcp->client)))
 		return 0;
 
-	pr_dbg(w->ctx, "Handling short send on client SOCKS5 data");
+	pr_dbg(&w->ctx->lh, "Handling short send on client SOCKS5 data");
 	ev.events = gcp->client.ep_mask;
 	ev.data.u64 = 0;
 	ev.data.ptr = gcp;
@@ -2288,7 +2182,7 @@ static int handle_ev_client_socks5(struct gwp_wrk *w,
 	assert(ctx->cfg.as_socks5);
 
 	if (unlikely(ev->events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP))) {
-		pr_info(ctx, "(EPOLLERR|EPOLLHUP|EPOLLRDHUP) on client SOCKS5 event");
+		pr_info(&ctx->lh, "(EPOLLERR|EPOLLHUP|EPOLLRDHUP) on client SOCKS5 event");
 		return -ECONNRESET;
 	}
 
@@ -2327,14 +2221,14 @@ static void log_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	struct gwp_ctx *ctx = w->ctx;
 
 	if (gde->res) {
-		pr_dbg(ctx, "DNS query failed: %s:%s (res=%d; idx=%u; cfd=%d; tfd=%d; ca=%s)",
+		pr_dbg(&ctx->lh, "DNS query failed: %s:%s (res=%d; idx=%u; cfd=%d; tfd=%d; ca=%s)",
 			gde->name, gde->service, gde->res,
 			gcp->idx, gcp->client.fd, gcp->target.fd,
 			ip_to_str(&gcp->client_addr));
 		return;
 	}
 
-	pr_dbg(ctx, "DNS query resolved: %s:%s -> %s (res=%d; idx=%u; cfd=%d; tfd=%d; ca=%s)",
+	pr_dbg(&ctx->lh, "DNS query resolved: %s:%s -> %s (res=%d; idx=%u; cfd=%d; tfd=%d; ca=%s)",
 		gde->name, gde->service, ip_to_str(&gde->addr), gde->res,
 		gcp->idx, gcp->client.fd, gcp->target.fd,
 		ip_to_str(&gcp->client_addr));
@@ -2435,7 +2329,7 @@ static int handle_event(struct gwp_wrk *w, struct epoll_event *ev)
 		r = handle_ev_socks5_auth_file(w);
 		break;
 	default:
-		pr_err(w->ctx, "Unknown event bit: %" PRIu64, ev_bit);
+		pr_err(&w->ctx->lh, "Unknown event bit: %" PRIu64, ev_bit);
 		return -EINVAL;
 	}
 
@@ -2476,7 +2370,7 @@ static int fish_events(struct gwp_wrk *w)
 	r = __sys_epoll_wait(w->ep_fd, w->events, w->evsz, -1);
 	if (unlikely(r < 0)) {
 		if (r != -EINTR)
-			pr_err(w->ctx, "epoll_wait failed: %s", strerror(-r));
+			pr_err(&w->ctx->lh, "epoll_wait failed: %s", strerror(-r));
 		else
 			r = 0;
 	}
@@ -2491,7 +2385,7 @@ static void *gwp_ctx_thread_entry(void *arg)
 	struct gwp_ctx *ctx = w->ctx;
 	int r = 0;
 
-	pr_info(ctx, "Worker %u started", w->idx);
+	pr_info(&ctx->lh, "Worker %u started", w->idx);
 	while (!ctx->stop) {
 		r = fish_events(w);
 		if (unlikely(r < 0))
@@ -2504,7 +2398,7 @@ static void *gwp_ctx_thread_entry(void *arg)
 
 	ctx->stop = true;
 	gwp_ctx_signal_all_workers(ctx);
-	pr_info(ctx, "Worker %u stopped", w->idx);
+	pr_info(&ctx->lh, "Worker %u stopped", w->idx);
 	return (void *)(intptr_t)r;
 }
 
@@ -2526,7 +2420,7 @@ static int gwp_ctx_run(struct gwp_ctx *ctx)
 		r = pthread_create(&w->thread, NULL, &gwp_ctx_thread_entry, w);
 		if (r) {
 			gwp_ctx_stop(ctx);
-			pr_err(ctx, "Failed to create worker thread %d: %s",
+			pr_err(&ctx->lh, "Failed to create worker thread %d: %s",
 				i, strerror(r));
 			return -r;
 		}
