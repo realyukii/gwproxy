@@ -1111,7 +1111,7 @@ static int setskopt_int(int fd, int level, int optname, int value)
 	return __sys_setsockopt(fd, level, optname, &value, sizeof(value));
 }
 
-static void setup_sock_options(struct gwp_wrk *w, int fd)
+void gwp_setup_cli_sock_options(struct gwp_wrk *w, int fd)
 {
 	struct gwp_cfg *cfg = &w->ctx->cfg;
 
@@ -1143,7 +1143,7 @@ int gwp_create_sock_target(struct gwp_wrk *w, struct gwp_sockaddr *addr,
 	if (unlikely(fd < 0))
 		return fd;
 
-	setup_sock_options(w, fd);
+	gwp_setup_cli_sock_options(w, fd);
 	len = (addr->sa.sa_family == AF_INET) ? sizeof(struct sockaddr_in)
 					      : sizeof(struct sockaddr_in6);
 	r = __sys_connect(fd, &addr->sa, len);
@@ -1350,7 +1350,7 @@ static int __handle_ev_accept(struct gwp_wrk *w)
 		goto out_err;
 	}
 
-	setup_sock_options(w, fd);
+	gwp_setup_cli_sock_options(w, fd);
 	gcp->client.fd = fd;
 	pr_dbg(&ctx->lh, "New connection from %s (fd=%d)",
 		ip_to_str(&gcp->client_addr), fd);

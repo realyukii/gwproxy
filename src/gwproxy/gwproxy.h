@@ -145,5 +145,6 @@ int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp);
 int gwp_create_sock_target(struct gwp_wrk *w, struct gwp_sockaddr *addr,
 			   bool *is_target_alive);
 int gwp_create_timer(int fd, int sec, int nsec);
+void gwp_setup_cli_sock_options(struct gwp_wrk *w, int fd);
 
 #endif /* #ifndef GWPROXY_H */
