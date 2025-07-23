@@ -52,6 +52,11 @@ enum {
 	EV_BIT_SOCKS5_AUTH_FILE	= (8ull << 48ull),
 };
 
+
+#define EV_BIT_ALL	(0xffffull << 48ull)
+#define GET_EV_BIT(X)	((X) & EV_BIT_ALL)
+#define CLEAR_EV_BIT(X)	((X) & ~EV_BIT_ALL)
+
 enum {
 	CONN_STATE_INIT			= 101,
 
@@ -134,11 +139,6 @@ struct gwp_ctx {
 	_Atomic(int32_t)		nr_fd_closed;
 	_Atomic(int32_t)		nr_accept_stopped;
 };
-
-/*
- * TODO(ammarfaizi2): Once epoll is further migrated, remove this.
- */
-int gwp_ctx_handle_event_epoll(struct gwp_wrk *w, struct epoll_event *ev);
 
 struct gwp_conn_pair *gwp_alloc_conn_pair(struct gwp_wrk *w);
 int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp);
