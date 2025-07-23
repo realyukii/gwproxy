@@ -1132,8 +1132,8 @@ static void setup_sock_options(struct gwp_wrk *w, int fd)
 }
 
 __hot
-static int create_sock_target(struct gwp_wrk *w, struct gwp_sockaddr *addr,
-			      bool *is_target_alive)
+int gwp_create_sock_target(struct gwp_wrk *w, struct gwp_sockaddr *addr,
+			   bool *is_target_alive)
 {
 	static const int t = SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC;
 	socklen_t len;
@@ -1161,7 +1161,7 @@ static int create_sock_target(struct gwp_wrk *w, struct gwp_sockaddr *addr,
 }
 
 __hot
-static int create_timer(int fd, int sec, int nsec)
+int gwp_create_timer(int fd, int sec, int nsec)
 {
 	static const int flags = TFD_CLOEXEC | TFD_NONBLOCK;
 	const struct itimerspec its = {
@@ -1223,8 +1223,8 @@ static int handle_new_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		if (unlikely(!gcp->s5_conn))
 			return -ENOMEM;
 	} else {
-		fd = create_sock_target(w, &gcp->target_addr,
-					&gcp->is_target_alive);
+		fd = gwp_create_sock_target(w, &gcp->target_addr,
+					    &gcp->is_target_alive);
 		if (unlikely(fd < 0)) {
 			pr_err(&ctx->lh, "Failed to create target socket: %s",
 				strerror(-fd));
@@ -1236,7 +1236,7 @@ static int handle_new_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	}
 
 	if (timeout > 0) {
-		timer_fd = create_timer(-1, timeout, 0);
+		timer_fd = gwp_create_timer(-1, timeout, 0);
 		if (unlikely(timer_fd < 0)) {
 			pr_err(&ctx->lh, "Failed to create connect timeout timer: %s",
 				strerror(-timer_fd));
@@ -1892,7 +1892,8 @@ static int handle_socks5_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		gcp->timer_fd = -1;
 	}
 
-	tfd = create_sock_target(w, &gcp->target_addr, &gcp->is_target_alive);
+	tfd = gwp_create_sock_target(w, &gcp->target_addr,
+				     &gcp->is_target_alive);
 	if (unlikely(tfd < 0)) {
 		pr_err(&w->ctx->lh, "Failed to create target socket: %s", strerror(-tfd));
 		return tfd;
@@ -1900,7 +1901,7 @@ static int handle_socks5_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 
 	r = w->ctx->cfg.connect_timeout;
 	if (r > 0) {
-		r = create_timer(-1, r, 0);
+		r = gwp_create_timer(-1, r, 0);
 		if (unlikely(r < 0))
 			return r;
 		gcp->timer_fd = r;
