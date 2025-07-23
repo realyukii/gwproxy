@@ -1026,60 +1026,70 @@ static int shrink_conn_slot(struct gwp_wrk *w)
 }
 
 __hot
-static int free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct gwp_conn_slot *gcs = &w->conn_slot;
-	struct gwp_ctx *ctx = w->ctx;
-	struct gwp_dns_entry *gde;
 	struct gwp_conn_pair *tmp;
 	uint32_t i = gcp->idx;
-	int nr_fd_closed = 0;
-	int r;
 
 	tmp = gcs->pairs[i];
 	assert(tmp == gcp);
 	if (unlikely(tmp != gcp))
 		return -EINVAL;
 
-	gde = gcp->gde;
+	log_conn_pair_close(w, gcp);
+	tmp = gcs->pairs[--gcs->nr];
+	gcs->pairs[gcs->nr] = NULL;
+	gcs->pairs[i] = tmp;
+	tmp->idx = i;
+
+	free_conn(&gcp->target);
+	free_conn(&gcp->client);
+
+	if (gcp->timer_fd >= 0)
+		__sys_close(gcp->timer_fd);
+
+	if (gcp->gde)
+		gwp_dns_entry_put(gcp->gde);
+
+	if (gcp->s5_conn)
+		gwp_socks5_conn_free(gcp->s5_conn);
+
+	free(gcp);
+	shrink_conn_slot(w);
+	return 0;
+}
+
+__hot
+static int free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	struct gwp_dns_entry *gde = gcp->gde;
+	struct gwp_ctx *ctx = w->ctx;
+	int nr_fd_closed = 0;
+	int r;
+
 	if (gde) {
 		r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_DEL, gde->ev_fd, NULL);
 		if (unlikely(r))
 			return r;
-
-		gwp_dns_entry_put(gde);
-		gcp->gde = NULL;
 	}
 
 	if (gcp->client.fd >= 0) {
 		nr_fd_closed++;
 		w->ev_need_reload = true;
-		log_conn_pair_close(w, gcp);
 	}
 
-	if (gcp->timer_fd >= 0) {
+	if (gcp->timer_fd >= 0)
 		nr_fd_closed++;
-		__sys_close(gcp->timer_fd);
-		gcp->timer_fd = -1;
-	}
-
 	if (gcp->target.fd >= 0)
 		nr_fd_closed++;
 
-	if (gcp->s5_conn) {
-		gwp_socks5_conn_free(gcp->s5_conn);
-		gcp->s5_conn = NULL;
+	r = gwp_free_conn_pair(w, gcp);
+	if (unlikely(r)) {
+		pr_err(&ctx->lh, "Failed to free connection pair: %s", strerror(-r));
+		return r;
 	}
 
-	tmp = gcs->pairs[--gcs->nr];
-	gcs->pairs[gcs->nr] = NULL;
-	gcs->pairs[i] = tmp;
-	tmp->idx = i;
-	free_conn(&gcp->target);
-	free_conn(&gcp->client);
-	free(gcp);
-
-	shrink_conn_slot(w);
 	if (unlikely(w->accept_is_stopped)) {
 		int x;
 		/*
@@ -1326,7 +1336,7 @@ static int __handle_ev_accept(struct gwp_wrk *w)
 	socklen_t addr_len;
 	int fd, r;
 
-	gcp = alloc_conn_pair(w);
+	gcp = gwp_alloc_conn_pair(w);
 	if (unlikely(!gcp)) {
 		pr_err(&ctx->lh, "Failed to allocate connection pair on accept");
 		return handle_accept_error(w, -ENOMEM);

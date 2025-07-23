@@ -141,5 +141,6 @@ struct gwp_ctx {
 int gwp_ctx_handle_event_epoll(struct gwp_wrk *w, struct epoll_event *ev);
 
 struct gwp_conn_pair *gwp_alloc_conn_pair(struct gwp_wrk *w);
+int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp);
 
 #endif /* #ifndef GWPROXY_H */
