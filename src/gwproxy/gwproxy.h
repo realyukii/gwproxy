@@ -146,5 +146,6 @@ int gwp_create_sock_target(struct gwp_wrk *w, struct gwp_sockaddr *addr,
 			   bool *is_target_alive);
 int gwp_create_timer(int fd, int sec, int nsec);
 void gwp_setup_cli_sock_options(struct gwp_wrk *w, int fd);
+const char *ip_to_str(const struct gwp_sockaddr *gs);
 
 #endif /* #ifndef GWPROXY_H */

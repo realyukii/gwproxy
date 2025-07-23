@@ -302,7 +302,7 @@ static int convert_ssaddr_to_str(char buf[FULL_ADDRSTRLEN],
 }
 
 __hot
-static const char *ip_to_str(const struct gwp_sockaddr *gs)
+const char *ip_to_str(const struct gwp_sockaddr *gs)
 {
 	static __thread char buf[8][FULL_ADDRSTRLEN];
 	static __thread uint8_t idx = 0;
