@@ -115,11 +115,10 @@ struct gwp_conn_pair {
 	 * is only incremented and decremented in the same thread
 	 * that processes the connection pair.
 	 */
-	bool			is_dying;
-	uint8_t			ref_cnt;
-	bool			is_shutdown;
-
-	uint64_t		timer_mem;
+	bool				is_dying;
+	bool				is_shutdown;
+	uint8_t				ref_cnt;
+	struct __kernel_timespec	ts;
 #endif
 
 	int			conn_state;

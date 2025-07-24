@@ -262,44 +262,31 @@ static struct io_uring_sqe *prep_send_client(struct gwp_wrk *w,
 	return s;
 }
 
-static struct io_uring_sqe *prep_add_timer_target(struct gwp_wrk *w,
-						  struct gwp_conn_pair *gcp)
+static struct io_uring_sqe *prep_timer_target(struct gwp_wrk *w,
+					      struct gwp_conn_pair *gcp)
 {
 	struct io_uring_sqe *s = get_sqe_nofail(w);
-	int fd = gcp->timer_fd;
-	assert(fd >= 0);
-	io_uring_prep_read(s, fd, &gcp->timer_mem, sizeof(gcp->timer_mem), 0);
+
+	gcp->ts.tv_nsec = 0;
+	gcp->ts.tv_sec = w->ctx->cfg.connect_timeout;
+	io_uring_prep_timeout(s, &gcp->ts, 1, 0);
 	io_uring_sqe_set_data(s, gcp);
 	s->user_data |= EV_BIT_TIMER;
-	s->flags |= IOSQE_ASYNC;
 	get_gcp(gcp);
 	pr_dbg(&w->ctx->lh,
-		"Prepared add timer for target fd=%d, ref_cnt=%hhu",
-		fd, gcp->ref_cnt);
+		"Prepared timer for target fd=%d, ts=%lld.%09lld, ref_cnt=%hhu",
+		gcp->target.fd, gcp->ts.tv_sec, gcp->ts.tv_nsec, gcp->ref_cnt);
 	return s;
 }
 
-static struct io_uring_sqe *prep_del_timer_target(struct gwp_wrk *w,
-						  struct gwp_conn_pair *gcp)
+static void prep_timer_del_target(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
-	struct io_uring_sqe *s;
-	int fd = gcp->timer_fd;
+	struct io_uring_sqe *s = get_sqe_nofail(w);
 
-	if (fd < 0)
-		return NULL;
-
-	s = get_sqe_nofail(w);
-	io_uring_prep_cancel64(s, EV_BIT_TIMER | (uintptr_t)gcp, 0);
+	io_uring_prep_timeout_remove(s, EV_BIT_TIMER | (uint64_t)gcp, 0);
 	io_uring_sqe_set_data(s, gcp);
 	s->user_data |= EV_BIT_TIMER_DEL;
-	s->flags |= IOSQE_IO_HARDLINK;
-	prep_close(w, fd);
-	gcp->timer_fd = -1;
 	get_gcp(gcp);
-	pr_dbg(&w->ctx->lh,
-		"Prepared delete timer for target fd=%d, ref_cnt=%hhu",
-		fd, gcp->ref_cnt);
-	return s;
 }
 
 static void shutdown_gcp(struct gwp_ctx *ctx, struct gwp_conn_pair *gcp)
@@ -323,7 +310,7 @@ static void shutdown_gcp(struct gwp_ctx *ctx, struct gwp_conn_pair *gcp)
 static int arm_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct io_uring_sqe *s;
-	int fd, r;
+	int r;
 
 	r = prep_nr_sqes(w, 4);
 	if (unlikely(r < 0)) {
@@ -335,23 +322,21 @@ static int arm_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	s->flags |= IOSQE_ASYNC | IOSQE_IO_LINK;
 
 	s = prep_recv_client(w, gcp);
+	(void)s;
 
 	s = prep_recv_target(w, gcp);
 	s->flags |= IOSQE_ASYNC;
 
-	fd = gcp->timer_fd;
-	if (fd >= 0) {
-		s = prep_add_timer_target(w, gcp);
-		s->flags |= IOSQE_ASYNC;
-	}
+	s = prep_timer_target(w, gcp);
+	s->flags |= IOSQE_ASYNC;
 
 	return 0;
 }
 
 static int __handle_ev_accept(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 {
-	int fd = cqe->res, tg_fd, tm_fd, r;
 	struct gwp_ctx *ctx = w->ctx;
+	int fd = cqe->res, tg_fd, r;
 	struct gwp_conn_pair *gcp;
 
 	if (unlikely(fd < 0)) {
@@ -371,28 +356,18 @@ static int __handle_ev_accept(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 		goto out_close;
 	}
 
-	if (ctx->cfg.connect_timeout > 0) {
-		tm_fd = gwp_create_timer(-1, ctx->cfg.connect_timeout, 0);
-		if (unlikely(tm_fd < 0)) {
-			pr_err(&ctx->lh, "gwp_create_timer: %s", strerror(-tm_fd));
-			goto out_close_tg_fd;
-		}
-	} else {
-		tm_fd = -1;
-	}
-
 	gcp = gwp_alloc_conn_pair(w);
 	if (unlikely(!gcp)) {
 		pr_err(&ctx->lh, "Allocate connection pair: %s", strerror(ENOMEM));
-		goto out_close_tm_fd;
+		goto out_close_tg_fd;
 	}
+
 	gcp->ref_cnt = 0;
 	gcp->is_dying = false;
 	gcp->is_shutdown = false;
 
 	gcp->client.fd = fd;
 	gcp->target.fd = tg_fd;
-	gcp->timer_fd = tm_fd;
 	gcp->client_addr = w->iou->accept_addr;
 	gcp->target_addr = ctx->target_addr;
 	gcp->is_target_alive = false;
@@ -406,9 +381,6 @@ static int __handle_ev_accept(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 out_free_pair:
 	gcp->client.fd = gcp->target.fd = gcp->timer_fd = -1;
 	gwp_free_conn_pair(w, gcp);
-out_close_tm_fd:
-	if (tm_fd >= 0)
-		prep_close(w, tm_fd);
 out_close_tg_fd:
 	prep_close(w, tg_fd);
 out_close:
@@ -438,7 +410,7 @@ static int handle_ev_target_connect(struct gwp_wrk *w, void *udata, int res)
 		return 0;
 	}
 
-	prep_del_timer_target(w, gcp);
+	prep_timer_del_target(w, gcp);
 	gcp->is_target_alive = true;
 	pr_info(&w->ctx->lh,
 		"Target socket connected (fd=%d, idx=%u, ca=%s, ta=%s)",
