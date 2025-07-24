@@ -41,9 +41,28 @@ err_free_iou:
 	return r;
 }
 
+static void signal_other_rings(struct gwp_wrk *w)
+{
+	struct io_uring *pr = &w->iou->ring;
+	struct gwp_ctx *ctx = w->ctx;
+	struct io_uring_sqe *s;
+	int i;
+
+	ctx->stop = true;
+	assert(w->idx == 0);
+	for (i = 1; i < ctx->cfg.nr_workers; i++) {
+		struct io_uring *r = &w->ctx->workers[i].iou->ring;
+		s = io_uring_get_sqe(pr);
+		io_uring_prep_msg_ring(s, r->ring_fd, 0, EV_BIT_MSG_RING, 0);
+		io_uring_submit(pr);
+	}
+}
+
 __cold
 void gwp_ctx_free_thread_io_uring(struct gwp_wrk *w)
 {
+	if (w->idx == 0)
+		signal_other_rings(w);
 	io_uring_queue_exit(&w->iou->ring);
 	free(w->iou);
 	w->iou = NULL;
@@ -595,6 +614,9 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 	case EV_BIT_TARGET_SEND:
 		pr_dbg(&ctx->lh, "Handling target send event: %d", cqe->res);
 		r = handle_ev_target_send(w, udata, cqe);
+		break;
+	case EV_BIT_MSG_RING:
+		r = 0;
 		break;
 	case EV_BIT_CLOSE:
 		inv_op = "close";
