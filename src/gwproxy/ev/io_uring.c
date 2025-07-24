@@ -19,6 +19,8 @@
 #include <liburing.h>
 #include <poll.h>
 
+#define USE_SEND_ZC 0
+
 __cold
 int gwp_ctx_init_thread_io_uring(struct gwp_wrk *w)
 {
@@ -154,17 +156,19 @@ static void get_gcp(struct gwp_conn_pair *gcp)
 static bool put_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	int tm_fd, tg_fd, cl_fd;
+	int x = gcp->ref_cnt--;
 
 	pr_dbg(&w->ctx->lh,
-		"Put connection pair (idx=%u, cfd=%d, tfd=%d, tmfd=%d, ca=%s, ta=%s, ref_cnt=%hhu)",
+		"Put connection pair (idx=%u, cfd=%d, tfd=%d, tmfd=%d, ca=%s, ta=%s, ref_cnt=%d)",
 		gcp->idx,
 		gcp->client.fd,
 		gcp->target.fd,
 		gcp->timer_fd,
 		ip_to_str(&gcp->client_addr),
 		ip_to_str(&gcp->target_addr),
-		gcp->ref_cnt);
-	if (gcp->ref_cnt-- > 1)
+		x - 1);
+
+	if (x > 1)
 		return false;
 
 	tm_fd = gcp->timer_fd;
@@ -200,7 +204,7 @@ static struct io_uring_sqe *prep_connect_target(struct gwp_wrk *w,
 	s->user_data |= EV_BIT_TARGET_CONNECT;
 	get_gcp(gcp);
 	pr_dbg(&w->ctx->lh,
-		"Prepared connect for target fd=%d, addr=%s, ref_cnt=%hhu",
+		"Prepared connect for target fd=%d, addr=%s, ref_cnt=%d",
 		fd, ip_to_str(&gcp->target_addr), gcp->ref_cnt);
 	return s;
 }
@@ -219,7 +223,7 @@ static struct io_uring_sqe *prep_recv_target(struct gwp_wrk *w,
 	s->user_data |= EV_BIT_TARGET_RECV;
 	get_gcp(gcp);
 	pr_dbg(&w->ctx->lh,
-		"Prepared recv for target fd=%d, len=%zu, buf=%p, ref_cnt=%hhu",
+		"Prepared recv for target fd=%d, len=%zu, buf=%p, ref_cnt=%d",
 		fd, len, buf, gcp->ref_cnt);
 	return s;
 }
@@ -238,7 +242,7 @@ static struct io_uring_sqe *prep_recv_client(struct gwp_wrk *w,
 	s->user_data |= EV_BIT_CLIENT_RECV;
 	get_gcp(gcp);
 	pr_dbg(&w->ctx->lh,
-		"Prepared recv for client fd=%d, len=%zu, buf=%p, ref_cnt=%hhu",
+		"Prepared recv for client fd=%d, len=%zu, buf=%p, ref_cnt=%d",
 		fd, len, buf, gcp->ref_cnt);
 	return s;
 }
@@ -252,12 +256,16 @@ static struct io_uring_sqe *prep_send_target(struct gwp_wrk *w,
 	struct io_uring_sqe *s;
 
 	s = get_sqe_nofail(w);
+#if USE_SEND_ZC
+	io_uring_prep_send_zc(s, fd, buf, len, MSG_NOSIGNAL, 0);
+#else
 	io_uring_prep_send(s, fd, buf, len, MSG_NOSIGNAL);
+#endif
 	io_uring_sqe_set_data(s, gcp);
 	s->user_data |= EV_BIT_TARGET_SEND;
 	get_gcp(gcp);
 	pr_dbg(&w->ctx->lh,
-		"Prepared send for target fd=%d, len=%zu, buf=%p, ref_cnt=%hhu",
+		"Prepared send for target fd=%d, len=%zu, buf=%p, ref_cnt=%d",
 		fd, len, buf, gcp->ref_cnt);
 	return s;
 }
@@ -271,12 +279,16 @@ static struct io_uring_sqe *prep_send_client(struct gwp_wrk *w,
 	struct io_uring_sqe *s;
 
 	s = get_sqe_nofail(w);
+#if USE_SEND_ZC
+	io_uring_prep_send_zc(s, fd, buf, len, MSG_NOSIGNAL, 0);
+#else
 	io_uring_prep_send(s, fd, buf, len, MSG_NOSIGNAL);
+#endif
 	io_uring_sqe_set_data(s, gcp);
 	s->user_data |= EV_BIT_CLIENT_SEND;
 	get_gcp(gcp);
 	pr_dbg(&w->ctx->lh,
-		"Prepared send for client fd=%d, len=%zu, buf=%p, ref_cnt=%hhu",
+		"Prepared send for client fd=%d, len=%zu, buf=%p, ref_cnt=%d",
 		fd, len, buf, gcp->ref_cnt);
 	return s;
 }
@@ -293,7 +305,7 @@ static struct io_uring_sqe *prep_timer_target(struct gwp_wrk *w,
 	s->user_data |= EV_BIT_TIMER;
 	get_gcp(gcp);
 	pr_dbg(&w->ctx->lh,
-		"Prepared timer for target fd=%d, ts=%lld.%09lld, ref_cnt=%hhu",
+		"Prepared timer for target fd=%d, ts=%lld.%09lld, ref_cnt=%d",
 		gcp->target.fd, gcp->ts.tv_sec, gcp->ts.tv_nsec, gcp->ref_cnt);
 	return s;
 }
@@ -306,6 +318,9 @@ static void prep_timer_del_target(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	io_uring_sqe_set_data(s, gcp);
 	s->user_data |= EV_BIT_TIMER_DEL;
 	get_gcp(gcp);
+	pr_dbg(&w->ctx->lh,
+		"Prepared del timer for target fd=%d, ref_cnt=%d",
+		gcp->target.fd, gcp->ref_cnt);
 }
 
 static void shutdown_gcp(struct gwp_ctx *ctx, struct gwp_conn_pair *gcp)
@@ -525,6 +540,14 @@ static int handle_ev_client_send(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 {
 	int r = cqe->res;
 
+#if USE_SEND_ZC
+	if (cqe->flags & IORING_CQE_F_MORE)
+		get_gcp(gcp);
+
+	if (cqe->flags & IORING_CQE_F_NOTIF)
+		return 0;
+#endif
+
 	if (unlikely(r < 0)) {
 		pr_err(&w->ctx->lh, "Client send failed: %s", strerror(-r));
 		gcp->is_dying = true;
@@ -543,6 +566,14 @@ static int handle_ev_target_send(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 				 struct io_uring_cqe *cqe)
 {
 	int r = cqe->res;
+
+#if USE_SEND_ZC
+	if (cqe->flags & IORING_CQE_F_MORE)
+		get_gcp(gcp);
+
+	if (cqe->flags & IORING_CQE_F_NOTIF)
+		return 0;
+#endif
 
 	if (unlikely(r < 0)) {
 		pr_err(&w->ctx->lh, "Target send failed: %s", strerror(-r));

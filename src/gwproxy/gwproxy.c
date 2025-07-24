@@ -901,8 +901,8 @@ static int init_conn(struct gwp_conn *conn, uint32_t buf_size)
 	conn->len = 0;
 	conn->cap = buf_size;
 	conn->ep_mask = 0;
-	conn->buf = malloc(buf_size);
-	return conn->buf ? 0 : -ENOMEM;
+	conn->buf = NULL;
+	return posix_memalign((void **)&conn->buf, 4096, buf_size) ? -ENOMEM : 0;
 }
 
 static void free_conn(struct gwp_conn *conn)

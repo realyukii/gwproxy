@@ -118,7 +118,7 @@ struct gwp_conn_pair {
 	 */
 	bool				is_dying;
 	bool				is_shutdown;
-	uint8_t				ref_cnt;
+	int				ref_cnt;
 	struct __kernel_timespec	ts;
 #endif
 
