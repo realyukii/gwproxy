@@ -8,6 +8,9 @@
 #include <gwproxy/common.h>
 #include <gwproxy/log.h>
 #include <gwproxy/ev/epoll.h>
+#ifdef CONFIG_IO_URING
+#include <gwproxy/ev/io_uring.h>
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -427,7 +430,9 @@ __cold
 static int gwp_ctx_init_thread_sock(struct gwp_wrk *w,
 				    const struct gwp_sockaddr *ba)
 {
-	static const int type = SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC;
+	struct gwp_ctx *ctx = w->ctx;
+	int type = SOCK_STREAM | SOCK_CLOEXEC | 
+			(ctx->ev_used == GWP_EV_EPOLL ? SOCK_NONBLOCK : 0);
 	struct gwp_cfg *cfg = &w->ctx->cfg;
 	socklen_t slen;
 	int fd, r, v;
@@ -488,12 +493,39 @@ static void gwp_ctx_free_thread_sock(struct gwp_wrk *w)
 
 static int gwp_ctx_init_thread_event(struct gwp_wrk *w)
 {
-	return gwp_ctx_init_thread_epoll(w);
+	switch (w->ctx->ev_used) {
+	case GWP_EV_EPOLL:
+		return gwp_ctx_init_thread_epoll(w);
+	case GWP_EV_IO_URING:
+#ifdef CONFIG_IO_URING
+		return gwp_ctx_init_thread_io_uring(w);
+#else
+		pr_err(&w->ctx->lh, "IO_URING support is not enabled in this build");
+		return -ENOSYS;
+#endif
+	default:
+		pr_err(&w->ctx->lh, "Unknown event loop type: %d", w->ctx->ev_used);
+		return -EINVAL;
+	}
 }
 
 static void gwp_ctx_free_thread_event(struct gwp_wrk *w)
 {
-	gwp_ctx_free_thread_epoll(w);
+	switch (w->ctx->ev_used) {
+	case GWP_EV_EPOLL:
+		gwp_ctx_free_thread_epoll(w);
+		break;
+	case GWP_EV_IO_URING:
+#ifdef CONFIG_IO_URING
+		gwp_ctx_free_thread_io_uring(w);
+#else
+		pr_err(&w->ctx->lh, "IO_URING support is not enabled in this build");
+#endif
+		break;
+	default:
+		pr_err(&w->ctx->lh, "Unknown event loop type: %d", w->ctx->ev_used);
+		break;
+	}
 }
 
 __cold
@@ -1045,9 +1077,9 @@ void gwp_setup_cli_sock_options(struct gwp_wrk *w, int fd)
 
 __hot
 int gwp_create_sock_target(struct gwp_wrk *w, struct gwp_sockaddr *addr,
-			   bool *is_target_alive)
+			   bool *is_target_alive, bool non_block)
 {
-	static const int t = SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC;
+	int t = SOCK_STREAM | SOCK_CLOEXEC | (non_block ? SOCK_NONBLOCK : 0);
 	socklen_t len;
 	int fd, r;
 
@@ -1056,6 +1088,18 @@ int gwp_create_sock_target(struct gwp_wrk *w, struct gwp_sockaddr *addr,
 		return fd;
 
 	gwp_setup_cli_sock_options(w, fd);
+
+	/*
+	 * Do not connect if non_block is false, as we
+	 * will not be able to handle the connection
+	 * in a non-blocking way.
+	 */
+	if (!non_block) {
+		if (is_target_alive)
+			*is_target_alive = false;
+		return fd;
+	}
+
 	len = (addr->sa.sa_family == AF_INET) ? sizeof(struct sockaddr_in)
 					      : sizeof(struct sockaddr_in6);
 	r = __sys_connect(fd, &addr->sa, len);
@@ -1111,7 +1155,23 @@ static void *gwp_ctx_thread_entry(void *arg)
 	int r;
 
 	pr_info(&ctx->lh, "Worker %u started", w->idx);
-	r = gwp_ctx_thread_entry_epoll(w);
+	switch (ctx->ev_used) {
+	case GWP_EV_EPOLL:
+		r = gwp_ctx_thread_entry_epoll(w);
+		break;
+	case GWP_EV_IO_URING:
+#ifdef CONFIG_IO_URING
+		r = gwp_ctx_thread_entry_io_uring(w);
+#else
+		pr_err(&ctx->lh, "IO_URING support is not enabled in this build");
+		r = -ENOSYS;
+#endif
+		break;
+	default:
+		pr_err(&ctx->lh, "Unknown event loop type: %d", ctx->ev_used);
+		r = -EINVAL;
+		break;
+	}
 	ctx->stop = true;
 	gwp_ctx_signal_all_workers(ctx);
 	pr_info(&ctx->lh, "Worker %u stopped", w->idx);

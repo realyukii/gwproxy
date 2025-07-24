@@ -192,14 +192,6 @@ static int free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	return 0;
 }
 
-static void log_conn_pair_created(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
-{
-	struct gwp_ctx *ctx = w->ctx;
-	pr_info(&ctx->lh, "New connection pair created (idx=%u, cfd=%d, tfd=%d, ca=%s, ta=%s)",
-		gcp->idx, gcp->client.fd, gcp->target.fd,
-		ip_to_str(&gcp->client_addr), ip_to_str(&gcp->target_addr));
-}
-
 __hot
 static int handle_new_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
@@ -225,7 +217,7 @@ static int handle_new_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 			return -ENOMEM;
 	} else {
 		fd = gwp_create_sock_target(w, &gcp->target_addr,
-					    &gcp->is_target_alive);
+					    &gcp->is_target_alive, true);
 		if (unlikely(fd < 0)) {
 			pr_err(&ctx->lh, "Failed to create target socket: %s",
 				strerror(-fd));
@@ -480,14 +472,6 @@ static int adjust_epl_mask(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	}
 
 	return 0;
-}
-
-__hot
-static void gwp_conn_buf_advance(struct gwp_conn *conn, size_t len)
-{
-	conn->len -= len;
-	if (conn->len)
-		memmove(conn->buf, conn->buf + len, conn->len);
 }
 
 __hot
@@ -894,7 +878,7 @@ static int handle_socks5_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	}
 
 	tfd = gwp_create_sock_target(w, &gcp->target_addr,
-				     &gcp->is_target_alive);
+				     &gcp->is_target_alive, true);
 	if (unlikely(tfd < 0)) {
 		pr_err(&w->ctx->lh, "Failed to create target socket: %s", strerror(-tfd));
 		return tfd;

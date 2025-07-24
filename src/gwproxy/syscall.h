@@ -269,6 +269,11 @@ static inline int __sys_timerfd_settime(int fd, int flags,
 				   old_value);
 }
 
+static inline int __sys_shutdown(int sockfd, int how)
+{
+	return (int) __do_syscall2(__NR_shutdown, sockfd, how);
+}
+
 #ifndef __NR_eventfd2
 #error "eventfd2 syscall not defined"
 #endif
@@ -417,6 +422,12 @@ static inline int __sys_timerfd_settime(int fd, int flags,
 				 struct itimerspec *old_value)
 {
 	int r = timerfd_settime(fd, flags, new_value, old_value);
+	return (r < 0) ? -errno : r;
+}
+
+static inline int __sys_shutdown(int sockfd, int how)
+{
+	int r = shutdown(sockfd, how);
 	return (r < 0) ? -errno : r;
 }
 #endif /* #endif __x86_64__ */

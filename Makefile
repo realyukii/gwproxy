@@ -35,6 +35,14 @@ GWPROXY_CC_SOURCES = \
 	$(GWPROXY_DIR)/gwproxy.c \
 	$(GWPROXY_DIR)/log.c \
 	$(GWPROXY_DIR)/ev/epoll.c
+
+
+ifeq ($(CONFIG_IO_URING),1)
+	CFLAGS += -DCONFIG_IO_URING
+	LIBS += /usr/lib/liburing.a
+	GWPROXY_CC_SOURCES += $(GWPROXY_DIR)/ev/io_uring.c
+endif
+
 GWPROXY_OBJECTS = $(GWPROXY_CC_SOURCES:%.c=%.c.o)
 
 LIBGWPSOCKS5_TARGET = libgwpsocks5.so
