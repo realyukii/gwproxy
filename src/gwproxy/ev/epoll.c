@@ -1203,6 +1203,8 @@ int gwp_ctx_thread_entry_epoll(struct gwp_wrk *w)
 	struct gwp_ctx *ctx = w->ctx;
 	int r = 0;
 
+	pr_info(&ctx->lh, "Worker %u started (epoll)", w->idx);
+
 	while (!ctx->stop) {
 		r = fish_events(w);
 		if (unlikely(r < 0))
@@ -1214,4 +1216,22 @@ int gwp_ctx_thread_entry_epoll(struct gwp_wrk *w)
 	}
 
 	return r;
+}
+
+__cold
+void gwp_ctx_signal_all_epoll(struct gwp_ctx *ctx)
+{
+	int i;
+
+	ctx->stop = true;
+	for (i = 0; i < ctx->cfg.nr_workers; i++) {
+		struct gwp_wrk *w = &ctx->workers[i];
+		int r;
+
+		do {
+			if (w->ev_fd < 0)
+				break;
+			r = eventfd_write(w->ev_fd, 1);
+		} while ((r < 0) && (r == -EINTR));
+	}
 }

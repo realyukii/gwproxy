@@ -532,27 +532,22 @@ __cold
 static int gwp_ctx_init_thread(struct gwp_wrk *w,
 			       const struct gwp_sockaddr *bind_addr)
 {
+	struct gwp_ctx *ctx = w->ctx;
 	int r;
 
 	r = gwp_ctx_init_thread_sock(w, bind_addr);
 	if (r < 0) {
-		pr_err(&w->ctx->lh, "Failed to initialize thread socket: %s\n",
-		       strerror(-r));
+		pr_err(&ctx->lh, "gwp_ctx_init_thread_sock: %s\n", strerror(-r));
 		return r;
 	}
 
 	r = gwp_ctx_init_thread_event(w);
 	if (r < 0) {
-		pr_err(&w->ctx->lh, "Failed to initialize event for worker %u: %s\n",
-			w->idx, strerror(-r));
-		goto out_free_sock;
+		pr_err(&ctx->lh, "gwp_ctx_init_thread_event: %s\n", strerror(-r));
+		gwp_ctx_free_thread_sock(w);
 	}
 
-	return 0;
-
-out_free_sock:
-	gwp_ctx_free_thread_sock(w);
-	return -r;
+	return r;
 }
 
 static void free_conn(struct gwp_conn *conn);
@@ -599,13 +594,26 @@ static void gwp_ctx_free_thread_sock_pairs(struct gwp_wrk *w)
 }
 
 __cold
+static void gwp_ctx_signal_all_workers(struct gwp_ctx *ctx)
+{
+	if (!ctx->workers)
+		return;
+
+	if (ctx->ev_used == GWP_EV_EPOLL) {
+		gwp_ctx_signal_all_epoll(ctx);
+	} else if (ctx->ev_used == GWP_EV_IO_URING) {
+#ifdef CONFIG_IO_URING
+		gwp_ctx_signal_all_io_uring(ctx);
+#endif
+	}
+}
+
+__cold
 static void gwp_ctx_free_thread(struct gwp_wrk *w)
 {
-	if (w->idx > 0)
-		pthread_join(w->thread, NULL);
 	gwp_ctx_free_thread_sock_pairs(w);
-	gwp_ctx_free_thread_event(w);
 	gwp_ctx_free_thread_sock(w);
+	gwp_ctx_free_thread_event(w);
 }
 
 __cold
@@ -654,11 +662,23 @@ out_err:
 __cold
 static void gwp_ctx_free_threads(struct gwp_ctx *ctx)
 {
-	struct gwp_wrk *workers = ctx->workers;
+	struct gwp_wrk *w, *workers = ctx->workers;
 	int i;
 
 	if (!workers)
 		return;
+
+	ctx->stop = true;
+	gwp_ctx_signal_all_workers(ctx);
+	for (i = 0; i < ctx->cfg.nr_workers; i++) {
+		w = &workers[i];
+		if (!w->need_join)
+			continue;
+
+		pr_dbg(&ctx->lh, "Joining worker thread %d", i);
+		pthread_join(w->thread, NULL);
+		w->need_join = false;
+	}
 
 	for (i = 0; i < ctx->cfg.nr_workers; i++)
 		gwp_ctx_free_thread(&workers[i]);
@@ -861,20 +881,6 @@ out_free_socks5:
 out_free_log:
 	gwp_ctx_free_log(ctx);
 	return r;
-}
-
-__cold
-static void gwp_ctx_signal_all_workers(struct gwp_ctx *ctx)
-{
-	int i;
-
-	if (!ctx->workers)
-		return;
-
-	for (i = 0; i < ctx->cfg.nr_workers; i++) {
-		struct gwp_wrk *w = &ctx->workers[i];
-		gwp_eventfd_write(w->ev_fd, 1);
-	}
 }
 
 __cold
@@ -1159,7 +1165,6 @@ static void *gwp_ctx_thread_entry(void *arg)
 	struct gwp_ctx *ctx = w->ctx;
 	int r;
 
-	pr_info(&ctx->lh, "Worker %u started", w->idx);
 	switch (ctx->ev_used) {
 	case GWP_EV_EPOLL:
 		r = gwp_ctx_thread_entry_epoll(w);
@@ -1206,6 +1211,7 @@ static int gwp_ctx_run(struct gwp_ctx *ctx)
 			return -r;
 		}
 
+		w->need_join = true;
 		snprintf(tmp, sizeof(tmp), "gwproxy-wrk-%d", i);
 		pthread_setname_np(w->thread, tmp);
 	}

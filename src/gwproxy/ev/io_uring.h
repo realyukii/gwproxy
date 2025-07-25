@@ -10,5 +10,6 @@
 int gwp_ctx_init_thread_io_uring(struct gwp_wrk *w);
 void gwp_ctx_free_thread_io_uring(struct gwp_wrk *w);
 int gwp_ctx_thread_entry_io_uring(struct gwp_wrk *w);
+void gwp_ctx_signal_all_io_uring(struct gwp_ctx *ctx);
 
 #endif /* #ifndef GWPROXY__EV__IO_URING_H */

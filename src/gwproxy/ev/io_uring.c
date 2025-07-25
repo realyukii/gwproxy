@@ -104,33 +104,11 @@ static struct io_uring_sqe *get_sqe_nofail(struct gwp_wrk *w)
 	abort();
 }
 
-static void signal_other_rings(struct gwp_wrk *w)
-{
-	struct io_uring *pr = &w->iou->ring;
-	struct gwp_ctx *ctx = w->ctx;
-	struct io_uring_sqe *s;
-	int i;
-
-	ctx->stop = true;
-
-	if (ctx->cfg.nr_workers <= 1)
-		return;
-
-	assert(w->idx == 0);
-	for (i = 1; i < ctx->cfg.nr_workers; i++) {
-		struct io_uring *or = &w->ctx->workers[i].iou->ring;
-		s = __get_sqe_nofail(pr);
-		io_uring_prep_msg_ring(s, or->ring_fd, 0, EV_BIT_MSG_RING, 0);
-	}
-	io_uring_submit_eintr(pr, 8);
-}
-
 __cold
 void gwp_ctx_free_thread_io_uring(struct gwp_wrk *w)
 {
-	if (w->idx == 0)
-		signal_other_rings(w);
 	io_uring_queue_exit(&w->iou->ring);
+	pr_dbg(&w->ctx->lh, "Worker %u io_uring queue exited", w->idx);
 	free(w->iou);
 	w->iou = NULL;
 }
@@ -762,6 +740,8 @@ int gwp_ctx_thread_entry_io_uring(struct gwp_wrk *w)
 	struct gwp_ctx *ctx = w->ctx;
 	int r = 0;
 
+	pr_info(&ctx->lh, "Worker %u started (io_uring)", w->idx);
+
 	r = arm_accept(w);
 	if (unlikely(r < 0)) {
 		pr_err(&ctx->lh, "Failed to arm accept: %s", strerror(-r));
@@ -785,4 +765,22 @@ int gwp_ctx_thread_entry_io_uring(struct gwp_wrk *w)
 	 */
 	submit_unconsumed_sqes(w);
 	return r;
+}
+
+__cold
+void gwp_ctx_signal_all_io_uring(struct gwp_ctx *ctx)
+{
+	struct gwp_wrk *we = &ctx->workers[0];
+	int i;
+
+	ctx->stop = true;
+	for (i = 0; i < ctx->cfg.nr_workers; i++) {
+		struct io_uring_sqe *s = __get_sqe_nofail(&we->iou->ring);
+		struct gwp_wrk *wo = &ctx->workers[i];
+		int fd = wo->iou->ring.ring_fd;
+		io_uring_prep_msg_ring(s, fd, 0, EV_BIT_MSG_RING, 0);
+		s->user_data = EV_BIT_MSG_RING;
+	}
+
+	io_uring_submit_eintr(&we->iou->ring, 8);
 }

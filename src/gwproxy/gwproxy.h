@@ -177,6 +177,7 @@ struct gwp_wrk {
 	};
 
 	bool			accept_is_stopped;
+	bool			need_join;
 	struct gwp_ctx		*ctx;
 	uint32_t		idx;
 	pthread_t		thread;
