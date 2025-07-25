@@ -93,6 +93,13 @@ struct gwp_conn {
 
 struct gwp_dns_query;
 
+enum {
+	/*
+	 * Don't close the file descriptor when freeing the connection pair.
+	 */
+	GWP_CONN_FLAG_NO_CLOSE_FD	=	(1 << 0)
+};
+
 struct gwp_conn_pair {
 	struct gwp_conn		target;
 	struct gwp_conn		client;
@@ -122,6 +129,7 @@ struct gwp_conn_pair {
 	struct __kernel_timespec	ts;
 #endif
 
+	uint32_t		flags;
 	int			conn_state;
 	int			timer_fd;
 	uint32_t		idx;

@@ -972,6 +972,7 @@ struct gwp_conn_pair *gwp_alloc_conn_pair(struct gwp_wrk *w)
 	gcp->idx = gcs->nr;
 	gcp->conn_state = CONN_STATE_INIT;
 	gcs->pairs[gcs->nr++] = gcp;
+	gcp->flags = 0;
 	return gcp;
 
 out_free_target_conn:
@@ -1028,6 +1029,10 @@ int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		return -EINVAL;
 
 	log_conn_pair_close(w, gcp);
+
+	if (gcp->flags & GWP_CONN_FLAG_NO_CLOSE_FD)
+		gcp->target.fd = gcp->client.fd = gcp->timer_fd = -1;
+
 	tmp = gcs->pairs[--gcs->nr];
 	gcs->pairs[gcs->nr] = NULL;
 	gcs->pairs[i] = tmp;

@@ -162,8 +162,8 @@ static void get_gcp(struct gwp_conn_pair *gcp)
 
 static bool put_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
-	int tm_fd, tg_fd, cl_fd;
 	int x = gcp->ref_cnt--;
+	int tg_fd, cl_fd;
 
 	pr_dbg(&w->ctx->lh,
 		"Put connection pair (idx=%u, cfd=%d, tfd=%d, tmfd=%d, ca=%s, ta=%s, ref_cnt=%d)",
@@ -178,14 +178,10 @@ static bool put_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	if (x > 1)
 		return false;
 
-	tm_fd = gcp->timer_fd;
 	tg_fd = gcp->target.fd;
 	cl_fd = gcp->client.fd;
-	gcp->client.fd = gcp->target.fd = gcp->timer_fd = -1;
+	gcp->flags |= GWP_CONN_FLAG_NO_CLOSE_FD;
 	gwp_free_conn_pair(w, gcp);
-
-	if (tm_fd >= 0)
-		prep_close(w, tm_fd);
 	prep_close(w, tg_fd);
 	prep_close(w, cl_fd);
 	return true;
