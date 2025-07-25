@@ -43,6 +43,40 @@ err_free_iou:
 	return r;
 }
 
+static void log_submit_err(struct gwp_wrk *w, int r)
+{
+	pr_err(&w->ctx->lh, "io_uring_submit(): %s", strerror(-r));
+}
+
+static struct io_uring_sqe *__get_sqe_nofail(struct io_uring *ring)
+{
+	struct io_uring_sqe *sqe;
+
+	sqe = io_uring_get_sqe(ring);
+	if (unlikely(!sqe)) {
+		int r = io_uring_submit(ring);
+		if (unlikely(r < 0))
+			return NULL;
+
+		sqe = io_uring_get_sqe(ring);
+		if (unlikely(!sqe))
+			return NULL;
+	}
+
+	return sqe;
+}
+
+static struct io_uring_sqe *get_sqe_nofail(struct gwp_wrk *w)
+{
+	struct io_uring_sqe *sqe = __get_sqe_nofail(&w->iou->ring);
+
+	if (likely(sqe))
+		return sqe;
+
+	pr_err(&w->ctx->lh, "Failed to get io_uring sqe for worker %u", w->idx);
+	abort();
+}
+
 static void signal_other_rings(struct gwp_wrk *w)
 {
 	struct io_uring *pr = &w->iou->ring;
@@ -51,13 +85,17 @@ static void signal_other_rings(struct gwp_wrk *w)
 	int i;
 
 	ctx->stop = true;
+
+	if (ctx->cfg.nr_workers <= 1)
+		return;
+
 	assert(w->idx == 0);
 	for (i = 1; i < ctx->cfg.nr_workers; i++) {
-		struct io_uring *r = &w->ctx->workers[i].iou->ring;
-		s = io_uring_get_sqe(pr);
-		io_uring_prep_msg_ring(s, r->ring_fd, 0, EV_BIT_MSG_RING, 0);
-		io_uring_submit(pr);
+		struct io_uring *or = &w->ctx->workers[i].iou->ring;
+		s = __get_sqe_nofail(pr);
+		io_uring_prep_msg_ring(s, or->ring_fd, 0, EV_BIT_MSG_RING, 0);
 	}
+	io_uring_submit(pr);
 }
 
 __cold
@@ -68,37 +106,6 @@ void gwp_ctx_free_thread_io_uring(struct gwp_wrk *w)
 	io_uring_queue_exit(&w->iou->ring);
 	free(w->iou);
 	w->iou = NULL;
-}
-
-static void log_submit_err(struct gwp_wrk *w, int r)
-{
-	pr_err(&w->ctx->lh, "io_uring_submit(): %s", strerror(-r));
-}
-
-static struct io_uring_sqe *get_sqe_nofail(struct gwp_wrk *w)
-{
-	struct gwp_ctx *ctx = w->ctx;
-	struct io_uring_sqe *sqe;
-	struct iou *iou = w->iou;
-	int r;
-
-	sqe = io_uring_get_sqe(&iou->ring);
-	if (unlikely(!sqe)) {
-		r = io_uring_submit(&iou->ring);
-		if (unlikely(r < 0)) {
-			log_submit_err(w, r);
-			return NULL;
-		}
-
-		sqe = io_uring_get_sqe(&iou->ring);
-		if (unlikely(!sqe))  {
-			/* io_uring bug? */
-			pr_err(&ctx->lh, "io_uring_get_sqe() failed!");
-			return NULL;
-		}
-	}
-
-	return sqe;
 }
 
 static int prep_nr_sqes(struct gwp_wrk *w, unsigned nr)
