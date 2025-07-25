@@ -48,13 +48,40 @@ static void log_submit_err(struct gwp_wrk *w, int r)
 	pr_err(&w->ctx->lh, "io_uring_submit(): %s", strerror(-r));
 }
 
+static int io_uring_submit_and_wait_eintr(struct io_uring *ring, unsigned nr,
+					  size_t nr_attemps)
+{
+	int r = 0;
+
+	while (nr_attemps--) {
+		r = io_uring_submit_and_wait(ring, nr);
+		if (likely(r >= 0 || r != -EINTR))
+			break;
+	}
+
+	return r;
+}
+
+static int io_uring_submit_eintr(struct io_uring *ring, size_t nr_attemps)
+{
+	int r = 0;
+
+	while (nr_attemps--) {
+		r = io_uring_submit(ring);
+		if (likely(r >= 0 || r != -EINTR))
+			break;
+	}
+
+	return r;
+}
+
 static struct io_uring_sqe *__get_sqe_nofail(struct io_uring *ring)
 {
 	struct io_uring_sqe *sqe;
 
 	sqe = io_uring_get_sqe(ring);
 	if (unlikely(!sqe)) {
-		int r = io_uring_submit(ring);
+		int r = io_uring_submit_eintr(ring, 8);
 		if (unlikely(r < 0))
 			return NULL;
 
@@ -95,7 +122,7 @@ static void signal_other_rings(struct gwp_wrk *w)
 		s = __get_sqe_nofail(pr);
 		io_uring_prep_msg_ring(s, or->ring_fd, 0, EV_BIT_MSG_RING, 0);
 	}
-	io_uring_submit(pr);
+	io_uring_submit_eintr(pr, 8);
 }
 
 __cold
@@ -111,7 +138,7 @@ void gwp_ctx_free_thread_io_uring(struct gwp_wrk *w)
 static int prep_nr_sqes(struct gwp_wrk *w, unsigned nr)
 {
 	if (io_uring_sq_space_left(&w->iou->ring) < nr) {
-		int r = io_uring_submit(&w->iou->ring);
+		int r = io_uring_submit_eintr(&w->iou->ring, 8);
 		if (unlikely(r < 0)) {
 			log_submit_err(w, r);
 			return r;
@@ -710,7 +737,7 @@ static int fish_events(struct gwp_wrk *w)
 	struct iou *iou = w->iou;
 	int r;
 
-	r = io_uring_submit_and_wait(&iou->ring, 1);
+	r = io_uring_submit_and_wait_eintr(&iou->ring, 1, 8);
 	if (unlikely(r < 0)) {
 		log_submit_err(w, r);
 		return r;
@@ -724,7 +751,7 @@ static void submit_unconsumed_sqes(struct gwp_wrk *w)
 	int r;
 
 	if (io_uring_sq_ready(&w->iou->ring) > 0) {
-		r = io_uring_submit(&w->iou->ring);
+		r = io_uring_submit_eintr(&w->iou->ring, 8);
 		if (unlikely(r < 0))
 			log_submit_err(w, r);
 	}
