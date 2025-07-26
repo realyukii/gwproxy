@@ -48,20 +48,6 @@ static void log_submit_err(struct gwp_wrk *w, int r)
 	pr_err(&w->ctx->lh, "io_uring_submit(): %s", strerror(-r));
 }
 
-static int io_uring_submit_and_wait_eintr(struct io_uring *ring, unsigned nr,
-					  size_t nr_attemps)
-{
-	int r = 0;
-
-	while (nr_attemps--) {
-		r = io_uring_submit_and_wait(ring, nr);
-		if (likely(r >= 0 || r != -EINTR))
-			break;
-	}
-
-	return r;
-}
-
 static int io_uring_submit_eintr(struct io_uring *ring, size_t nr_attemps)
 {
 	int r = 0;
@@ -715,10 +701,14 @@ static int fish_events(struct gwp_wrk *w)
 	struct iou *iou = w->iou;
 	int r;
 
-	r = io_uring_submit_and_wait_eintr(&iou->ring, 1, 8);
+	r = io_uring_submit_and_wait(&iou->ring, 1);
 	if (unlikely(r < 0)) {
-		log_submit_err(w, r);
-		return r;
+		if (r != -EINTR) {
+			log_submit_err(w, r);
+			return r;
+		}
+
+		pr_info(&w->ctx->lh, "io_uring_submit_and_wait() interrupted");
 	}
 
 	return 0;
