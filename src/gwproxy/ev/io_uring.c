@@ -472,20 +472,21 @@ static int handle_ev_client_recv(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	struct io_uring_sqe *s;
 	int r = cqe->res;
 
-	if (unlikely(r < 0)) {
+	if (unlikely(r <= 0)) {
 		if (r == -EAGAIN || r == -EINTR) {
 			s = prep_recv_client(w, gcp);
 			s->flags |= IOSQE_ASYNC;
 			return 0;
 		}
 
-		if (r)
-			pr_err(&w->ctx->lh, "Client recv: %s", strerror(-r));
+		if (gcp->flags & GWP_CONN_FLAG_IS_DYING)
+			return 0;
 
 		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
-		return 0;
-	} else if (unlikely(!r)) {
-		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
+		if (!r)
+			return 0;
+
+		pr_err(&w->ctx->lh, "Client recv: %s", strerror(-r));
 		return 0;
 	}
 
@@ -497,24 +498,24 @@ static int handle_ev_client_recv(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 static int handle_ev_target_recv(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 				 struct io_uring_cqe *cqe)
 {
-	struct io_uring_sqe *s;
 	int r = cqe->res;
 
-	if (unlikely(r < 0)) {
+	if (unlikely(r <= 0)) {
 		if (r == -EAGAIN || r == -EINTR) {
-			s = prep_recv_target(w, gcp);
+			struct io_uring_sqe *s = prep_recv_target(w, gcp);
 			s->flags |= IOSQE_ASYNC;
 			return 0;
 		}
 
-		if (!r)
-			pr_err(&w->ctx->lh, "Target recv: %s", strerror(-r));
+		if (gcp->flags & GWP_CONN_FLAG_IS_DYING)
+			return 0;
 
 		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
+		if (!r)
+			return 0;
+
+		pr_err(&w->ctx->lh, "Target recv: %s", strerror(-r));
 		return 0;
-	} else if (unlikely(!r)) {
-		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
-		return r;
 	}
 
 	gcp->target.len += (size_t)r;
@@ -535,12 +536,21 @@ static int handle_ev_client_send(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 		return 0;
 #endif
 
-	if (unlikely(r < 0)) {
+	if (unlikely(r <= 0)) {
+		if (r == -EAGAIN || r == -EINTR) {
+			struct io_uring_sqe *s = prep_send_client(w, gcp);
+			s->flags |= IOSQE_ASYNC;
+			return 0;
+		}
+
+		if (gcp->flags & GWP_CONN_FLAG_IS_DYING)
+			return 0;
+
+		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
+		if (!r)
+			return 0;
+
 		pr_err(&w->ctx->lh, "Client send failed: %s", strerror(-r));
-		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
-		return 0;
-	} else if (unlikely(!r)) {
-		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
 		return 0;
 	}
 
@@ -562,12 +572,21 @@ static int handle_ev_target_send(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 		return 0;
 #endif
 
-	if (unlikely(r < 0)) {
+	if (unlikely(r <= 0)) {
+		if (r == -EAGAIN || r == -EINTR) {
+			struct io_uring_sqe *s = prep_send_target(w, gcp);
+			s->flags |= IOSQE_ASYNC;
+			return 0;
+		}
+
+		if (gcp->flags & GWP_CONN_FLAG_IS_DYING)
+			return 0;
+
+		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
+		if (!r)
+			return 0;
+
 		pr_err(&w->ctx->lh, "Target send failed: %s", strerror(-r));
-		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
-		return 0;
-	} else if (unlikely(!r)) {
-		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
 		return 0;
 	}
 
