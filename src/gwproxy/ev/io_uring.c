@@ -112,23 +112,17 @@ static int prep_nr_sqes(struct gwp_wrk *w, unsigned nr)
 	return 0;
 }
 
-static int arm_accept(struct gwp_wrk *w)
+static void arm_accept(struct gwp_wrk *w)
 {
 	struct io_uring_sqe *s = get_sqe_nofail(w);
 	struct iou *iou = w->iou;
 	struct sockaddr *addr = &iou->accept_addr.sa;
 	socklen_t *addr_len = &iou->accept_addr_len;
 
-	if (unlikely(!s)) {
-		pr_err(&w->ctx->lh, "Failed to get io_uring sqe for accept");
-		return -ENOMEM;
-	}
-
 	*addr_len = sizeof(iou->accept_addr);
 	io_uring_prep_accept(s, w->tcp_fd, addr, addr_len, SOCK_CLOEXEC);
 	s->flags |= IOSQE_ASYNC;
 	s->user_data = EV_BIT_ACCEPT;
-	return 0;
 }
 
 static void prep_close(struct gwp_wrk *w, int fd)
@@ -425,7 +419,8 @@ static int handle_ev_accept(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 		return r;
 	}
 
-	return arm_accept(w);
+	arm_accept(w);
+	return 0;
 }
 
 static int handle_ev_target_connect(struct gwp_wrk *w, void *udata, int res)
@@ -732,12 +727,7 @@ int gwp_ctx_thread_entry_io_uring(struct gwp_wrk *w)
 
 	pr_info(&ctx->lh, "Worker %u started (io_uring)", w->idx);
 
-	r = arm_accept(w);
-	if (unlikely(r < 0)) {
-		pr_err(&ctx->lh, "Failed to arm accept: %s", strerror(-r));
-		return r;
-	}
-
+	arm_accept(w);
 	while (!ctx->stop) {
 		r = fish_events(w);
 		if (unlikely(r < 0))
