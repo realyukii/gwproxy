@@ -311,19 +311,30 @@ static void prep_timer_del_target(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		gcp->target.fd, gcp->ref_cnt);
 }
 
-static void shutdown_gcp(struct gwp_ctx *ctx, struct gwp_conn_pair *gcp)
+static void shutdown_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
+	struct gwp_ctx *ctx = w->ctx;
+	struct io_uring_sqe *s;
+
 	if (gcp->flags & GWP_CONN_FLAG_IS_SHUTDOWN)
 		return;
 
 	if (gcp->target.fd >= 0) {
 		pr_dbg(&ctx->lh, "Shutting down target connection (fd=%d)", gcp->target.fd);
-		__sys_shutdown(gcp->target.fd, SHUT_RDWR);
+		s = get_sqe_nofail(w);
+		io_uring_prep_shutdown(s, gcp->target.fd, SHUT_RDWR);
+		io_uring_sqe_set_data(s, gcp);
+		s->user_data |= EV_BIT_TARGET_SHUTDOWN;
+		get_gcp(gcp);
 	}
 
 	if (gcp->client.fd >= 0) {
 		pr_dbg(&ctx->lh, "Shutting down client connection (fd=%d)", gcp->client.fd);
-		__sys_shutdown(gcp->client.fd, SHUT_RDWR);
+		s = get_sqe_nofail(w);
+		io_uring_prep_shutdown(s, gcp->client.fd, SHUT_RDWR);
+		io_uring_sqe_set_data(s, gcp);
+		s->user_data |= EV_BIT_CLIENT_SHUTDOWN;
+		get_gcp(gcp);
 	}
 
 	gcp->flags |= GWP_CONN_FLAG_IS_SHUTDOWN;
@@ -636,18 +647,21 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 		pr_dbg(&ctx->lh, "Handling target send event: %d", cqe->res);
 		r = handle_ev_target_send(w, udata, cqe);
 		break;
+	case EV_BIT_CLIENT_SHUTDOWN:
+		pr_dbg(&ctx->lh, "Handling client shutdown event: %d", cqe->res);
+		assert(gcp->flags & GWP_CONN_FLAG_IS_SHUTDOWN);
+		r = 0;
+		break;
+	case EV_BIT_TARGET_SHUTDOWN:
+		pr_dbg(&ctx->lh, "Handling target shutdown event: %d", cqe->res);
+		assert(gcp->flags & GWP_CONN_FLAG_IS_SHUTDOWN);
+		r = 0;
+		break;
 	case EV_BIT_MSG_RING:
 		return 0;
 	case EV_BIT_CLOSE:
 		inv_op = "close";
 		goto out_bug;
-	case EV_BIT_TARGET_SHUTDOWN:
-		inv_op = "target shutdown";
-		goto out_bug;
-	case EV_BIT_CLIENT_SHUTDOWN:
-		inv_op = "client shutdown";
-		goto out_bug;
-		break;
 	default:
 		pr_err(&ctx->lh, "Unknown event bit: %" PRIu64 "; res=%d", ev_bit, cqe->res);
 		return -EINVAL;
@@ -657,7 +671,7 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 
 	if ((gcp->flags & GWP_CONN_FLAG_IS_DYING) &&
 	    !(gcp->flags & GWP_CONN_FLAG_IS_SHUTDOWN))
-		shutdown_gcp(ctx, gcp);
+		shutdown_gcp(w, gcp);
 
 	put_gcp(w, gcp);
 	return r;
