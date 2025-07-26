@@ -595,35 +595,19 @@ static int handle_ev_target_send(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	return 0;
 }
 
-static bool is_udata_gcp(uint64_t ev_bit)
-{
-	switch (ev_bit) {
-	case EV_BIT_CLIENT_RECV:
-	case EV_BIT_TARGET_RECV:
-	case EV_BIT_CLIENT_SEND:
-	case EV_BIT_TARGET_SEND:
-	case EV_BIT_TARGET_CONNECT:
-	case EV_BIT_TIMER:
-	case EV_BIT_TIMER_DEL:
-		return true;
-	default:
-		return false;
-	}
-}
-
 static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 {
 	void *udata = (void *)CLEAR_EV_BIT(cqe->user_data);
 	uint64_t ev_bit = GET_EV_BIT(cqe->user_data);
 	struct gwp_ctx *ctx = w->ctx;
+	struct gwp_conn_pair *gcp;
 	const char *inv_op;
 	int r;
 
 	switch (ev_bit) {
 	case EV_BIT_ACCEPT:
 		pr_dbg(&ctx->lh, "Handling accept event");
-		r = handle_ev_accept(w, cqe);
-		break;
+		return handle_ev_accept(w, cqe);
 	case EV_BIT_TARGET_CONNECT:
 		pr_dbg(&ctx->lh, "Handling target connect event");
 		r = handle_ev_target_connect(w, udata, cqe->res);
@@ -653,8 +637,7 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 		r = handle_ev_target_send(w, udata, cqe);
 		break;
 	case EV_BIT_MSG_RING:
-		r = 0;
-		break;
+		return 0;
 	case EV_BIT_CLOSE:
 		inv_op = "close";
 		goto out_bug;
@@ -667,20 +650,16 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 		break;
 	default:
 		pr_err(&ctx->lh, "Unknown event bit: %" PRIu64 "; res=%d", ev_bit, cqe->res);
-		r = -EINVAL;
-		break;
+		return -EINVAL;
 	}
 
-	if (is_udata_gcp(ev_bit)) {
-		struct gwp_conn_pair *gcp = udata;
+	gcp = udata;
 
-		if ((gcp->flags & GWP_CONN_FLAG_IS_DYING) &&
-		    !(gcp->flags & GWP_CONN_FLAG_IS_SHUTDOWN))
-			shutdown_gcp(ctx, gcp);
+	if ((gcp->flags & GWP_CONN_FLAG_IS_DYING) &&
+	    !(gcp->flags & GWP_CONN_FLAG_IS_SHUTDOWN))
+		shutdown_gcp(ctx, gcp);
 
-		put_gcp(w, gcp);
-	}
-
+	put_gcp(w, gcp);
 	return r;
 
 out_bug:
