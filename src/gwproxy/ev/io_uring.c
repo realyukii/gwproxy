@@ -313,7 +313,7 @@ static void prep_timer_del_target(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 
 static void shutdown_gcp(struct gwp_ctx *ctx, struct gwp_conn_pair *gcp)
 {
-	if (gcp->is_shutdown)
+	if (gcp->flags & GWP_CONN_FLAG_IS_SHUTDOWN)
 		return;
 
 	if (gcp->target.fd >= 0) {
@@ -326,7 +326,7 @@ static void shutdown_gcp(struct gwp_ctx *ctx, struct gwp_conn_pair *gcp)
 		__sys_shutdown(gcp->client.fd, SHUT_RDWR);
 	}
 
-	gcp->is_shutdown = true;
+	gcp->flags |= GWP_CONN_FLAG_IS_SHUTDOWN;
 }
 
 static int arm_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
@@ -385,8 +385,6 @@ static int __handle_ev_accept(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 	}
 
 	gcp->ref_cnt = 0;
-	gcp->is_dying = false;
-	gcp->is_shutdown = false;
 
 	gcp->client.fd = fd;
 	gcp->target.fd = tg_fd;
@@ -429,7 +427,7 @@ static int handle_ev_target_connect(struct gwp_wrk *w, void *udata, int res)
 
 	if (unlikely(res < 0)) {
 		pr_err(&w->ctx->lh, "Target connect failed: %s", strerror(-res));
-		gcp->is_dying = true;
+		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
 		return 0;
 	}
 
@@ -450,7 +448,7 @@ static int handle_ev_timer(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	struct gwp_ctx *ctx = w->ctx;
 
 	if (!gcp->is_target_alive) {
-		gcp->is_dying = true;
+		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
 		assert(is_timer_del == false);
 		pr_warn(&ctx->lh,
 			"Connection timeout! (idx=%u, cfd=%d, tfd=%d, ca=%s, ta=%s)",
@@ -484,10 +482,10 @@ static int handle_ev_client_recv(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 		if (r)
 			pr_err(&w->ctx->lh, "Client recv: %s", strerror(-r));
 
-		gcp->is_dying = true;
+		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
 		return 0;
 	} else if (unlikely(!r)) {
-		gcp->is_dying = true;
+		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
 		return 0;
 	}
 
@@ -512,10 +510,10 @@ static int handle_ev_target_recv(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 		if (!r)
 			pr_err(&w->ctx->lh, "Target recv: %s", strerror(-r));
 
-		gcp->is_dying = true;
+		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
 		return 0;
 	} else if (unlikely(!r)) {
-		gcp->is_dying = true;
+		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
 		return r;
 	}
 
@@ -539,10 +537,10 @@ static int handle_ev_client_send(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 
 	if (unlikely(r < 0)) {
 		pr_err(&w->ctx->lh, "Client send failed: %s", strerror(-r));
-		gcp->is_dying = true;
+		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
 		return 0;
 	} else if (unlikely(!r)) {
-		gcp->is_dying = true;
+		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
 		return 0;
 	}
 
@@ -566,10 +564,10 @@ static int handle_ev_target_send(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 
 	if (unlikely(r < 0)) {
 		pr_err(&w->ctx->lh, "Target send failed: %s", strerror(-r));
-		gcp->is_dying = true;
+		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
 		return 0;
 	} else if (unlikely(!r)) {
-		gcp->is_dying = true;
+		gcp->flags |= GWP_CONN_FLAG_IS_DYING;
 		return 0;
 	}
 
@@ -657,8 +655,9 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 	if (is_udata_gcp(ev_bit)) {
 		struct gwp_conn_pair *gcp = udata;
 
-		if (gcp->is_dying && !gcp->is_shutdown)
-			shutdown_gcp(w->ctx, gcp);
+		if ((gcp->flags & GWP_CONN_FLAG_IS_DYING) &&
+		    !(gcp->flags & GWP_CONN_FLAG_IS_SHUTDOWN))
+			shutdown_gcp(ctx, gcp);
 
 		put_gcp(w, gcp);
 	}

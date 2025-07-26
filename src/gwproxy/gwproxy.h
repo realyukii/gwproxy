@@ -97,7 +97,9 @@ enum {
 	/*
 	 * Don't close the file descriptor when freeing the connection pair.
 	 */
-	GWP_CONN_FLAG_NO_CLOSE_FD	=	(1 << 0)
+	GWP_CONN_FLAG_NO_CLOSE_FD	= (1ull << 0ull),
+	GWP_CONN_FLAG_IS_DYING		= (1ull << 1ull),
+	GWP_CONN_FLAG_IS_SHUTDOWN	= (1ull << 2ull),
 };
 
 struct gwp_conn_pair {
@@ -106,30 +108,11 @@ struct gwp_conn_pair {
 	bool			is_target_alive;
 
 #if CONFIG_IO_URING
-	/*
-	 * @is_dying and @ref_cnt are only used by io_uring.
-	 *
-	 * @is_dying is set to true when either target or client
-	 * connection is closed, and it is used to prevent further
-	 * processing of the connection pair.
-	 *
-	 * @ref_cnt is used to track the number of references
-	 * to the connection pair. It is incremented when the
-	 * connection pair is allocated and decremented when it
-	 * is freed. When the reference count reaches zero, the
-	 * connection pair is freed.
-	 * 
-	 * @ref_cnt does not need to be atomic because the reference
-	 * is only incremented and decremented in the same thread
-	 * that processes the connection pair.
-	 */
-	bool				is_dying;
-	bool				is_shutdown;
 	int				ref_cnt;
 	struct __kernel_timespec	ts;
 #endif
 
-	uint32_t		flags;
+	uint64_t		flags;
 	int			conn_state;
 	int			timer_fd;
 	uint32_t		idx;
