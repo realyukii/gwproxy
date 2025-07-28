@@ -619,7 +619,8 @@ static int fetch_addr(struct gwp_dns_cache_entry *e, struct gwp_sockaddr *addr,
 			if (!fetch_i4(e, addr, port))
 				return -EHOSTUNREACH;
 		}
-	} else if (restyp == GWP_DNS_RESTYP_PREFER_IPV4) {
+	} else if (restyp == GWP_DNS_RESTYP_PREFER_IPV4 ||
+		   restyp == GWP_DNS_RESTYP_DEFAULT) {
 		if (!fetch_i4(e, addr, port)) {
 			if (!fetch_i6(e, addr, port))
 				return -EHOSTUNREACH;
@@ -679,10 +680,27 @@ static void free_cache(struct gwp_dns_cache *cache)
 	cache = NULL;
 }
 
+static inline bool validate_restyp(int restyp)
+{
+	switch (restyp) {
+	case GWP_DNS_RESTYP_DEFAULT:
+	case GWP_DNS_RESTYP_IPV4_ONLY:
+	case GWP_DNS_RESTYP_IPV6_ONLY:
+	case GWP_DNS_RESTYP_PREFER_IPV4:
+	case GWP_DNS_RESTYP_PREFER_IPV6:
+		return true;
+	default:
+		return false;
+	}
+}
+
 int gwp_dns_ctx_init(struct gwp_dns_ctx **ctx_p, const struct gwp_dns_cfg *cfg)
 {
 	struct gwp_dns_ctx *ctx;
 	int r;
+
+	if (!validate_restyp(cfg->restyp))
+		return -EINVAL;
 
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx)
