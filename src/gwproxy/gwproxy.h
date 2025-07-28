@@ -57,8 +57,8 @@ enum {
 
 	EV_BIT_CLOSE		= (9ull << 48ull),
 	EV_BIT_TARGET_CONNECT	= (10ull << 48ull),
-	EV_BIT_TARGET_SHUTDOWN	= (11ull << 48ull),
-	EV_BIT_CLIENT_SHUTDOWN	= (12ull << 48ull),
+	EV_BIT_TARGET_CANCEL	= (11ull << 48ull),
+	EV_BIT_CLIENT_CANCEL	= (12ull << 48ull),
 	EV_BIT_TIMER_DEL	= (13ull << 48ull),
 	EV_BIT_TARGET_SEND	= (14ull << 48ull),
 	EV_BIT_CLIENT_SEND	= (15ull << 48ull),

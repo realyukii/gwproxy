@@ -319,20 +319,20 @@ static void shutdown_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		return;
 
 	if (gcp->target.fd >= 0) {
-		pr_dbg(&ctx->lh, "Shutting down target connection (fd=%d)", gcp->target.fd);
+		pr_dbg(&ctx->lh, "Cancelling target recv (fd=%d)", gcp->target.fd);
 		s = get_sqe_nofail(w);
-		io_uring_prep_shutdown(s, gcp->target.fd, SHUT_RDWR);
+		io_uring_prep_cancel_fd(s, gcp->target.fd, 0);
 		io_uring_sqe_set_data(s, gcp);
-		s->user_data |= EV_BIT_TARGET_SHUTDOWN;
+		s->user_data |= EV_BIT_TARGET_CANCEL;
 		get_gcp(gcp);
 	}
 
 	if (gcp->client.fd >= 0) {
-		pr_dbg(&ctx->lh, "Shutting down client connection (fd=%d)", gcp->client.fd);
+		pr_dbg(&ctx->lh, "Cancelling client recv (fd=%d)", gcp->client.fd);
 		s = get_sqe_nofail(w);
-		io_uring_prep_shutdown(s, gcp->client.fd, SHUT_RDWR);
+		io_uring_prep_cancel_fd(s, gcp->client.fd, 0);
 		io_uring_sqe_set_data(s, gcp);
-		s->user_data |= EV_BIT_CLIENT_SHUTDOWN;
+		s->user_data |= EV_BIT_CLIENT_CANCEL;
 		get_gcp(gcp);
 	}
 
@@ -635,14 +635,14 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 		pr_dbg(&ctx->lh, "Handling target send event: %d", cqe->res);
 		r = handle_ev_target_send(w, udata, cqe);
 		break;
-	case EV_BIT_CLIENT_SHUTDOWN:
-		pr_dbg(&ctx->lh, "Handling client shutdown event: %d", cqe->res);
+	case EV_BIT_TARGET_CANCEL:
+		pr_dbg(&ctx->lh, "Handling target cancel event: %d", cqe->res);
 		assert(gcp->flags & GWP_CONN_FLAG_IS_SHUTDOWN);
 		r = 0;
 		break;
-	case EV_BIT_TARGET_SHUTDOWN:
-		pr_dbg(&ctx->lh, "Handling target shutdown event: %d", cqe->res);
-		assert(gcp->flags & GWP_CONN_FLAG_IS_SHUTDOWN);
+	case EV_BIT_CLIENT_CANCEL:
+		pr_dbg(&ctx->lh, "Handling client cancel event: %d", cqe->res);
+		assert(gcp->flags & GWP_CONN_FLAG_IS_CANCEL);
 		r = 0;
 		break;
 	case EV_BIT_MSG_RING:
