@@ -121,7 +121,6 @@ static void arm_accept(struct gwp_wrk *w)
 
 	*addr_len = sizeof(iou->accept_addr);
 	io_uring_prep_accept(s, w->tcp_fd, addr, addr_len, SOCK_CLOEXEC);
-	s->flags |= IOSQE_ASYNC;
 	s->user_data = EV_BIT_ACCEPT;
 }
 
@@ -352,16 +351,10 @@ static int arm_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	}
 
 	s = prep_connect_target(w, gcp);
-	s->flags |= IOSQE_ASYNC | IOSQE_IO_LINK;
-
-	s = prep_recv_client(w, gcp);
-	(void)s;
-
-	s = prep_recv_target(w, gcp);
-	s->flags |= IOSQE_ASYNC;
-
-	s = prep_timer_target(w, gcp);
-	s->flags |= IOSQE_ASYNC;
+	s->flags |= IOSQE_IO_LINK;
+	prep_recv_client(w, gcp);
+	prep_recv_target(w, gcp);
+	prep_timer_target(w, gcp);
 
 	return 0;
 }
@@ -480,13 +473,11 @@ static int handle_ev_timer(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 static int handle_ev_client_recv(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 				 struct io_uring_cqe *cqe)
 {
-	struct io_uring_sqe *s;
 	int r = cqe->res;
 
 	if (unlikely(r <= 0)) {
 		if (r == -EAGAIN || r == -EINTR) {
-			s = prep_recv_client(w, gcp);
-			s->flags |= IOSQE_ASYNC;
+			prep_recv_client(w, gcp);
 			return 0;
 		}
 
@@ -513,8 +504,7 @@ static int handle_ev_target_recv(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 
 	if (unlikely(r <= 0)) {
 		if (r == -EAGAIN || r == -EINTR) {
-			struct io_uring_sqe *s = prep_recv_target(w, gcp);
-			s->flags |= IOSQE_ASYNC;
+			prep_recv_target(w, gcp);
 			return 0;
 		}
 
@@ -549,8 +539,7 @@ static int handle_ev_client_send(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 
 	if (unlikely(r <= 0)) {
 		if (r == -EAGAIN || r == -EINTR) {
-			struct io_uring_sqe *s = prep_send_client(w, gcp);
-			s->flags |= IOSQE_ASYNC;
+			prep_send_client(w, gcp);
 			return 0;
 		}
 
@@ -585,8 +574,7 @@ static int handle_ev_target_send(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 
 	if (unlikely(r <= 0)) {
 		if (r == -EAGAIN || r == -EINTR) {
-			struct io_uring_sqe *s = prep_send_target(w, gcp);
-			s->flags |= IOSQE_ASYNC;
+			prep_send_target(w, gcp);
 			return 0;
 		}
 
