@@ -726,6 +726,7 @@ int gwp_ctx_thread_entry_io_uring(struct gwp_wrk *w)
 
 	pr_info(&ctx->lh, "Worker %u started (io_uring)", w->idx);
 
+	io_uring_set_iowait(&w->iou->ring, false);
 	arm_accept(w);
 	while (!ctx->stop) {
 		r = fish_events(w);
