@@ -179,11 +179,6 @@ static void kill_gcp(struct gwp_conn_pair *gcp)
 	gcp->flags |= GWP_CONN_FLAG_IS_DYING;
 }
 
-static bool is_gcp_dying(struct gwp_conn_pair *gcp)
-{
-	return (gcp->flags & GWP_CONN_FLAG_IS_DYING) != 0;
-}
-
 static struct io_uring_sqe *prep_connect_target(struct gwp_wrk *w,
 						struct gwp_conn_pair *gcp)
 {
@@ -483,29 +478,35 @@ static int handle_ev_timer(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	return 0;
 }
 
+static int handle_sock_ret(int r)
+{
+	if (r < 0) {
+		if (r == -EAGAIN || r == -EINTR)
+			return 0;
+
+		return r;
+	}
+
+	if (!r)
+		return -ECONNRESET;
+
+	return r;
+}
+
 static int handle_ev_client_recv(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 				 struct io_uring_cqe *cqe)
 {
 	int r = cqe->res;
 
-	if (unlikely(r <= 0)) {
-		if (r == -EAGAIN || r == -EINTR) {
-			prep_recv_client(w, gcp);
-			return 0;
-		}
-
-		if (is_gcp_dying(gcp))
-			return 0;
-
-		kill_gcp(gcp);
-		if (!r)
-			return 0;
-
-		pr_err(&w->ctx->lh, "Client recv: %s", strerror(-r));
+	r = handle_sock_ret(r);
+	if (r < 0) {
+		return r;
+	} else if (!r) {
+		prep_recv_client(w, gcp);
 		return 0;
 	}
 
-	gcp->client.len += (size_t)r;
+	gcp->client.len += (uint32_t)r;
 	prep_send_target(w, gcp);
 	return 0;
 }
@@ -515,24 +516,15 @@ static int handle_ev_target_recv(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 {
 	int r = cqe->res;
 
-	if (unlikely(r <= 0)) {
-		if (r == -EAGAIN || r == -EINTR) {
-			prep_recv_target(w, gcp);
-			return 0;
-		}
-
-		if (is_gcp_dying(gcp))
-			return 0;
-
-		kill_gcp(gcp);
-		if (!r)
-			return 0;
-
-		pr_err(&w->ctx->lh, "Target recv: %s", strerror(-r));
+	r = handle_sock_ret(r);
+	if (r < 0) {
+		return r;
+	} else if (!r) {
+		prep_recv_target(w, gcp);
 		return 0;
 	}
 
-	gcp->target.len += (size_t)r;
+	gcp->target.len += (uint32_t)r;
 	prep_send_client(w, gcp);
 	return 0;
 }
@@ -542,28 +534,11 @@ static int handle_ev_client_send(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 {
 	int r = cqe->res;
 
-#if USE_SEND_ZC
-	if (cqe->flags & IORING_CQE_F_MORE)
-		get_gcp(gcp);
-
-	if (cqe->flags & IORING_CQE_F_NOTIF)
-		return 0;
-#endif
-
-	if (unlikely(r <= 0)) {
-		if (r == -EAGAIN || r == -EINTR) {
-			prep_send_client(w, gcp);
-			return 0;
-		}
-
-		if (is_gcp_dying(gcp))
-			return 0;
-
-		kill_gcp(gcp);
-		if (!r)
-			return 0;
-
-		pr_err(&w->ctx->lh, "Client send failed: %s", strerror(-r));
+	r = handle_sock_ret(r);
+	if (r < 0) {
+		return r;
+	} else if (!r) {
+		prep_send_client(w, gcp);
 		return 0;
 	}
 
@@ -577,28 +552,11 @@ static int handle_ev_target_send(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 {
 	int r = cqe->res;
 
-#if USE_SEND_ZC
-	if (cqe->flags & IORING_CQE_F_MORE)
-		get_gcp(gcp);
-
-	if (cqe->flags & IORING_CQE_F_NOTIF)
-		return 0;
-#endif
-
-	if (unlikely(r <= 0)) {
-		if (r == -EAGAIN || r == -EINTR) {
-			prep_send_target(w, gcp);
-			return 0;
-		}
-
-		if (is_gcp_dying(gcp))
-			return 0;
-
-		kill_gcp(gcp);
-		if (!r)
-			return 0;
-
-		pr_err(&w->ctx->lh, "Target send failed: %s", strerror(-r));
+	r = handle_sock_ret(r);
+	if (r < 0) {
+		return r;
+	} else if (!r) {
+		prep_send_target(w, gcp);
 		return 0;
 	}
 
@@ -671,13 +629,11 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 	}
 
 	gcp = udata;
-
-	if ((is_gcp_dying(gcp)) &&
-	    !(gcp->flags & GWP_CONN_FLAG_IS_CANCEL))
+	if (r && !(gcp->flags & GWP_CONN_FLAG_IS_CANCEL))
 		shutdown_gcp(w, gcp);
 
 	put_gcp(w, gcp);
-	return r;
+	return 0;
 
 out_bug:
 	pr_err(&ctx->lh, "Bug, invalid %s: res=%d, fd=%ld, s=%s", inv_op,
