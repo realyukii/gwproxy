@@ -2,6 +2,9 @@
 /*
  * Copyright (C) 2025 Ammar Faizi <ammarfaizi2@gnuweeb.org>
  */
+
+#ifdef CONFIG_IO_URING
+
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -764,3 +767,5 @@ void gwp_ctx_signal_all_io_uring(struct gwp_ctx *ctx)
 
 	io_uring_submit_eintr(&we->iou->ring, 8);
 }
+
+#endif // CONFIG_IO_URING
