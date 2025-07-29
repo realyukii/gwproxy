@@ -9,6 +9,7 @@ LIBS = -lpthread
 DEPFLAGS = -MMD -MP -MF $@.d
 LDFLAGS_SHARED = $(LDFLAGS) -shared -fpic -fPIC
 GWPROXY_DIR = ./src/gwproxy
+LIBURING_DIR = ./src/liburing/src
 
 ifeq ($(SANITIZE),1)
 	CFLAGS += -fsanitize=address -fsanitize=undefined
@@ -30,6 +31,8 @@ ifeq ($(STATIC),1)
 	LDFLAGS += -static
 endif
 
+LIBURING_TARGET = $(LIBURING_DIR)/liburing.a
+
 GWPROXY_TARGET = gwproxy
 GWPROXY_CC_SOURCES = \
 	$(GWPROXY_DIR)/gwproxy.c \
@@ -39,7 +42,7 @@ GWPROXY_CC_SOURCES = \
 
 ifeq ($(CONFIG_IO_URING),1)
 	CFLAGS += -DCONFIG_IO_URING
-	LIBS += /usr/lib/liburing.a
+	LIBS += $(LIBURING_TARGET)
 	GWPROXY_CC_SOURCES += $(GWPROXY_DIR)/ev/io_uring.c
 endif
 
@@ -66,7 +69,10 @@ ALL_DEPFILES = $(ALL_OBJECTS:.o=.o.d)
 
 ALL_GWPROXY_OBJECTS = $(GWPROXY_OBJECTS) $(LIBGWPSOCKS5_OBJECTS) $(LIBGWDNS_OBJECTS)
 
-all: $(GWPROXY_TARGET) $(LIBGWPSOCKS5_TARGET) $(LIBGWDNS_TARGET)
+all: $(GWPROXY_TARGET) $(LIBGWPSOCKS5_TARGET) $(LIBGWDNS_TARGET) $(LIBURING_TARGET)
+
+$(LIBURING_TARGET): $(LIBURING_DIR)
+	@$(MAKE) -C $^
 
 $(GWPROXY_TARGET): $(ALL_GWPROXY_OBJECTS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
