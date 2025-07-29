@@ -169,14 +169,13 @@ static bool put_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	cl_fd = gcp->client.fd;
 	gcp->flags |= GWP_CONN_FLAG_NO_CLOSE_FD;
 	gwp_free_conn_pair(w, gcp);
-	prep_close(w, tg_fd);
-	prep_close(w, cl_fd);
-	return true;
-}
 
-static void kill_gcp(struct gwp_conn_pair *gcp)
-{
-	gcp->flags |= GWP_CONN_FLAG_IS_DYING;
+	if (tg_fd >= 0)
+		prep_close(w, tg_fd);
+	if (cl_fd >= 0)
+		prep_close(w, cl_fd);
+
+	return true;
 }
 
 static struct io_uring_sqe *prep_connect_target(struct gwp_wrk *w,
@@ -265,8 +264,8 @@ static struct io_uring_sqe *prep_send_target(struct gwp_wrk *w,
 	return s;
 }
 
-static struct io_uring_sqe *prep_send_client(struct gwp_wrk *w,
-					     struct gwp_conn_pair *gcp)
+static struct io_uring_sqe *__prep_send_client(struct gwp_wrk *w,
+					       struct gwp_conn_pair *gcp)
 {
 	size_t len = gcp->target.len;
 	char *buf = gcp->target.buf;
@@ -280,7 +279,6 @@ static struct io_uring_sqe *prep_send_client(struct gwp_wrk *w,
 	io_uring_prep_send(s, fd, buf, len, MSG_NOSIGNAL);
 #endif
 	io_uring_sqe_set_data(s, gcp);
-	s->user_data |= EV_BIT_CLIENT_SEND;
 	get_gcp(gcp);
 	pr_dbg(&w->ctx->lh,
 		"Prepared send for client fd=%d, len=%zu, buf=%p, ref_cnt=%d",
@@ -288,14 +286,31 @@ static struct io_uring_sqe *prep_send_client(struct gwp_wrk *w,
 	return s;
 }
 
+static struct io_uring_sqe *prep_send_client(struct gwp_wrk *w,
+					     struct gwp_conn_pair *gcp)
+{
+	struct io_uring_sqe *s = __prep_send_client(w, gcp);
+	s->user_data |= EV_BIT_CLIENT_SEND;
+	return s;
+}
+
+static struct io_uring_sqe *prep_send_client_no_cb(struct gwp_wrk *w,
+						   struct gwp_conn_pair *gcp)
+{
+	struct io_uring_sqe *s = __prep_send_client(w, gcp);
+	s->user_data |= EV_BIT_CLIENT_SEND_NO_CB;
+	return s;
+}
+
 static struct io_uring_sqe *prep_timer_target(struct gwp_wrk *w,
-					      struct gwp_conn_pair *gcp)
+					      struct gwp_conn_pair *gcp,
+					      int sec)
 {
 	struct io_uring_sqe *s = get_sqe_nofail(w);
 
 	gcp->ts.tv_nsec = 0;
-	gcp->ts.tv_sec = w->ctx->cfg.connect_timeout;
-	io_uring_prep_timeout(s, &gcp->ts, 1, 0);
+	gcp->ts.tv_sec = sec;
+	io_uring_prep_timeout(s, &gcp->ts, 0, 0);
 	io_uring_sqe_set_data(s, gcp);
 	s->user_data |= EV_BIT_TIMER;
 	get_gcp(gcp);
@@ -347,8 +362,46 @@ static void shutdown_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	gcp->flags |= GWP_CONN_FLAG_IS_CANCEL;
 }
 
-static int arm_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+static struct io_uring_sqe *prep_recv_client_socks5(struct gwp_wrk *w,
+						    struct gwp_conn_pair *gcp)
 {
+	struct io_uring_sqe *s = prep_recv_client(w, gcp);
+	s->user_data &= ~EV_BIT_ALL;
+	s->user_data |= EV_BIT_CLIENT_SOCKS5;
+	return s;
+}
+
+static int arm_gcp_socks5(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	struct gwp_ctx *ctx = w->ctx;
+	int r;
+
+	gcp->s5_conn = gwp_socks5_conn_alloc(ctx->socks5);
+	if (unlikely(!gcp->s5_conn))
+		return -ENOMEM;
+
+	r = prep_nr_sqes(w, 4);
+	if (unlikely(r < 0)) {
+		pr_err(&w->ctx->lh, "Failed to prepare sqes for connection pair");
+		return r;
+	}
+
+	prep_recv_client_socks5(w, gcp);
+
+	/*
+	 * If we are running as a SOCKS5 proxy, the initial connection
+	 * does not have a target socket. We will create the target
+	 * socket later, when the client sends a CONNECT command.
+	 */
+	if (ctx->cfg.socks5_timeout > 0)
+		prep_timer_target(w, gcp, ctx->cfg.socks5_timeout);
+
+	return 0;
+}
+
+static int do_prep_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	struct gwp_ctx *ctx = w->ctx;
 	struct io_uring_sqe *s;
 	int r;
 
@@ -362,9 +415,26 @@ static int arm_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	s->flags |= IOSQE_IO_LINK;
 	prep_recv_client(w, gcp);
 	prep_recv_target(w, gcp);
-	prep_timer_target(w, gcp);
+
+	if (ctx->cfg.connect_timeout > 0)
+		prep_timer_target(w, gcp, ctx->cfg.connect_timeout);
 
 	return 0;
+}
+
+static int arm_gcp_no_socks5(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	return do_prep_connect(w, gcp);
+}
+
+static int arm_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	struct gwp_ctx *ctx = w->ctx;
+
+	if (ctx->cfg.as_socks5)
+		return arm_gcp_socks5(w, gcp);
+	else
+		return arm_gcp_no_socks5(w, gcp);
 }
 
 static int __handle_ev_accept(struct gwp_wrk *w, struct io_uring_cqe *cqe)
@@ -384,10 +454,14 @@ static int __handle_ev_accept(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 		return fd;
 	}
 
-	tg_fd = gwp_create_sock_target(w, &ctx->target_addr, NULL, false);
-	if (unlikely(tg_fd < 0)) {
-		pr_err(&ctx->lh, "Create target socket: %s", strerror(-tg_fd));
-		goto out_close;
+	if (!ctx->cfg.as_socks5) {
+		tg_fd = gwp_create_sock_target(w, &ctx->target_addr, NULL, false);
+		if (unlikely(tg_fd < 0)) {
+			pr_err(&ctx->lh, "Create target socket: %s", strerror(-tg_fd));
+			goto out_close;
+		}
+	} else {
+		tg_fd = -1;
 	}
 
 	gcp = gwp_alloc_conn_pair(w);
@@ -414,9 +488,11 @@ out_free_pair:
 	gcp->client.fd = gcp->target.fd = gcp->timer_fd = -1;
 	gwp_free_conn_pair(w, gcp);
 out_close_tg_fd:
-	prep_close(w, tg_fd);
+	if (tg_fd >= 0)
+		prep_close(w, tg_fd);
 out_close:
-	prep_close(w, fd);
+	if (fd >= 0)
+		prep_close(w, fd);
 	return -ENOMEM;
 }
 
@@ -436,11 +512,11 @@ static int handle_ev_accept(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 static int handle_ev_target_connect(struct gwp_wrk *w, void *udata, int res)
 {
 	struct gwp_conn_pair *gcp = udata;
+	int r;
 
 	if (unlikely(res < 0)) {
 		pr_err(&w->ctx->lh, "Target connect failed: %s", strerror(-res));
-		kill_gcp(gcp);
-		return 0;
+		return res;
 	}
 
 	prep_timer_del_target(w, gcp);
@@ -451,6 +527,15 @@ static int handle_ev_target_connect(struct gwp_wrk *w, void *udata, int res)
 		ip_to_str(&gcp->client_addr),
 		ip_to_str(&gcp->target_addr));
 
+	if (w->ctx->cfg.as_socks5) {
+		r = gwp_socks5_prep_connect_reply(w, gcp, res);
+		if (r)
+			return r;
+
+		if (gcp->target.len)
+			prep_send_client_no_cb(w, gcp);
+	}
+
 	return 0;
 }
 
@@ -458,10 +543,11 @@ static int handle_ev_timer(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 			   bool is_timer_del, int res)
 {
 	struct gwp_ctx *ctx = w->ctx;
+	int r = 0;
 
-	if (!gcp->is_target_alive) {
-		kill_gcp(gcp);
+	if (!gcp->is_target_alive && res == -ETIME) {
 		assert(is_timer_del == false);
+		r = -ETIME;
 		pr_warn(&ctx->lh,
 			"Connection timeout! (idx=%u, cfd=%d, tfd=%d, ca=%s, ta=%s)",
 			gcp->idx, gcp->client.fd, gcp->target.fd,
@@ -475,7 +561,7 @@ static int handle_ev_timer(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 		gcp->timer_fd, ip_to_str(&gcp->client_addr),
 		ip_to_str(&gcp->target_addr), is_timer_del, res);
 
-	return 0;
+	return r;
 }
 
 static int handle_sock_ret(int r)
@@ -543,7 +629,8 @@ static int handle_ev_client_send(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	}
 
 	gwp_conn_buf_advance(&gcp->target, (size_t)r);
-	prep_recv_target(w, gcp);
+	if (gcp->target.fd >= 0)
+		prep_recv_target(w, gcp);
 	return 0;
 }
 
@@ -565,6 +652,100 @@ static int handle_ev_target_send(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	return 0;
 }
 
+static int handle_socks5_connect_target(struct gwp_wrk *w,
+					struct gwp_conn_pair *gcp)
+{
+	int r;
+
+	r = gwp_create_sock_target(w, &gcp->target_addr, NULL, false);
+	if (r < 0) {
+		pr_err(&w->ctx->lh, "Create target socket: %s", strerror(-r));
+		return r;
+	}
+
+	gcp->target.fd = r;
+	return do_prep_connect(w, gcp);
+}
+
+static int prep_domain_resolution(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	struct gwp_dns_entry *gde = gcp->gde;
+	struct gwp_ctx *ctx = w->ctx;
+	struct io_uring_sqe *s;
+
+	assert(gde);
+	s = get_sqe_nofail(w);
+	io_uring_prep_poll_add(s, gde->ev_fd, POLLIN);
+	io_uring_sqe_set_data(s, gcp);
+	s->user_data |= EV_BIT_DNS_QUERY;
+	get_gcp(gcp);
+	pr_dbg(&ctx->lh,
+		"Prepared DNS query for domain '%s' (fd=%d, idx=%u, ref_cnt=%d)",
+		gde->name, gde->ev_fd, gcp->idx, gcp->ref_cnt);
+
+	return 0;
+}
+
+static int handle_ev_client_socks5(struct gwp_wrk *w,
+				   struct gwp_conn_pair *gcp,
+				   struct io_uring_cqe *cqe)
+{
+	int r = cqe->res;
+
+	r = handle_sock_ret(r);
+	if (r < 0) {
+		return r;
+	} else if (!r) {
+		prep_recv_client_socks5(w, gcp);
+		return 0;
+	}
+
+	gcp->client.len += (uint32_t)r;
+	r = gwp_socks5_handle_data(gcp);
+	if (r)
+		return r;
+
+	if (gcp->target.len)
+		prep_send_client(w, gcp);
+
+	if (gcp->s5_conn->state == GWP_SOCKS5_ST_CMD_CONNECT) {
+		r = gwp_socks5_prepare_target_addr(w, gcp);
+		if (r == -EINPROGRESS)
+			return prep_domain_resolution(w, gcp);
+
+		if (r)
+			return r;
+
+		r = handle_socks5_connect_target(w, gcp);
+	} else {
+		prep_recv_client_socks5(w, gcp);
+	}
+
+	return r;
+}
+
+static int handle_ev_dns_query(struct gwp_wrk *w, void *udata)
+{
+	struct gwp_conn_pair *gcp = udata;
+	struct gwp_ctx *ctx = w->ctx;
+	struct gwp_dns_entry *gde = gcp->gde;
+
+	if (gde->res) {
+		pr_info(&ctx->lh, "Failed to resolve domain '%s': %d",
+			gde->name, gde->res);
+		return gde->res;
+	}
+
+	gcp->target_addr = gde->addr;
+	pr_info(&ctx->lh, "Domain '%s' resolved to %s (fd=%d, idx=%u)",
+		gde->name, ip_to_str(&gcp->target_addr), gcp->target.fd,
+		gcp->idx);
+
+	gwp_dns_entry_put(gde);
+	gcp->gde = NULL;
+	return handle_socks5_connect_target(w, gcp);
+}
+
 static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 {
 	void *udata = (void *)CLEAR_EV_BIT(cqe->user_data);
@@ -576,10 +757,10 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 
 	switch (ev_bit) {
 	case EV_BIT_ACCEPT:
-		pr_dbg(&ctx->lh, "Handling accept event");
+		pr_dbg(&ctx->lh, "Handling accept event: %d", cqe->res);
 		return handle_ev_accept(w, cqe);
 	case EV_BIT_TARGET_CONNECT:
-		pr_dbg(&ctx->lh, "Handling target connect event");
+		pr_dbg(&ctx->lh, "Handling target connect event: %d", cqe->res);
 		r = handle_ev_target_connect(w, udata, cqe->res);
 		break;
 	case EV_BIT_TIMER:
@@ -606,6 +787,14 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 		pr_dbg(&ctx->lh, "Handling target send event: %d", cqe->res);
 		r = handle_ev_target_send(w, udata, cqe);
 		break;
+	case EV_BIT_CLIENT_SOCKS5:
+		pr_dbg(&ctx->lh, "Handling client SOCKS5 event: %d", cqe->res);
+		r = handle_ev_client_socks5(w, udata, cqe);
+		break;
+	case EV_BIT_CLIENT_SEND_NO_CB:
+		pr_dbg(&ctx->lh, "Handling client send no callback event: %d", cqe->res);
+		r = (cqe->res < 0) ? cqe->res : 0;
+		break;
 	case EV_BIT_TARGET_CANCEL:
 		gcp = udata;
 		pr_dbg(&ctx->lh, "Handling target cancel event: %d", cqe->res);
@@ -617,6 +806,10 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 		pr_dbg(&ctx->lh, "Handling client cancel event: %d", cqe->res);
 		assert(gcp->flags & GWP_CONN_FLAG_IS_CANCEL);
 		r = 0;
+		break;
+	case EV_BIT_DNS_QUERY:
+		pr_dbg(&ctx->lh, "Handling DNS query event: %d", cqe->res);
+		r = handle_ev_dns_query(w, udata);
 		break;
 	case EV_BIT_MSG_RING:
 		return 0;

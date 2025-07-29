@@ -64,7 +64,9 @@ enum {
 	EV_BIT_CLIENT_SEND	= (15ull << 48ull),
 	EV_BIT_CLIENT_RECV	= EV_BIT_CLIENT,
 	EV_BIT_TARGET_RECV	= EV_BIT_TARGET,
-	EV_BIT_MSG_RING		= (16ull << 48ull)
+	EV_BIT_MSG_RING		= (16ull << 48ull),
+
+	EV_BIT_CLIENT_SEND_NO_CB	= (17ull << 48ull),
 };
 
 
