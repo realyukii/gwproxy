@@ -1240,6 +1240,26 @@ int gwp_socks5_prep_connect_reply(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	return 0;
 }
 
+__hot
+int gwp_socks5_handle_data(struct gwp_conn_pair *gcp)
+{
+	struct gwp_socks5_conn *sc = gcp->s5_conn;
+	size_t out_len, in_len;
+	void *in, *out;
+	int r;
+
+	assert(sc);
+
+	in = gcp->client.buf;
+	in_len = gcp->client.len;
+	out = gcp->target.buf + gcp->target.len;
+	out_len = gcp->target.cap - gcp->target.len;
+	r = gwp_socks5_conn_handle_data(sc, in, &in_len, out, &out_len);
+	gwp_conn_buf_advance(&gcp->client, in_len);
+	gcp->target.len += out_len;
+	return (r == -EAGAIN) ? 0 : r;
+}
+
 noinline
 static void *gwp_ctx_thread_entry(void *arg)
 {

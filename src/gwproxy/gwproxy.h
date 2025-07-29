@@ -213,5 +213,6 @@ void log_conn_pair_created(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 
 int gwp_socks5_prep_connect_reply(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 				  int err);
+int gwp_socks5_handle_data(struct gwp_conn_pair *gcp);
 
 #endif /* #ifndef GWPROXY_H */
