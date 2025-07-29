@@ -9,7 +9,7 @@ LIBS = -lpthread
 DEPFLAGS = -MMD -MP -MF $@.d
 LDFLAGS_SHARED = $(LDFLAGS) -shared -fpic -fPIC
 GWPROXY_DIR = ./src/gwproxy
-LIBURING_DIR = ./src/liburing/src
+LIBURING_DIR = ./src/liburing
 
 ifeq ($(SANITIZE),1)
 	CFLAGS += -fsanitize=address -fsanitize=undefined
@@ -31,7 +31,7 @@ ifeq ($(STATIC),1)
 	LDFLAGS += -static
 endif
 
-LIBURING_TARGET = $(LIBURING_DIR)/liburing.a
+LIBURING_TARGET = $(LIBURING_DIR)/src/liburing.a
 
 GWPROXY_TARGET = gwproxy
 GWPROXY_CC_SOURCES = \
