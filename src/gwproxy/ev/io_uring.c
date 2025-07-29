@@ -639,11 +639,13 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 		r = handle_ev_target_send(w, udata, cqe);
 		break;
 	case EV_BIT_TARGET_CANCEL:
+		gcp = udata;
 		pr_dbg(&ctx->lh, "Handling target cancel event: %d", cqe->res);
 		assert(gcp->flags & GWP_CONN_FLAG_IS_CANCEL);
 		r = 0;
 		break;
 	case EV_BIT_CLIENT_CANCEL:
+		gcp = udata;
 		pr_dbg(&ctx->lh, "Handling client cancel event: %d", cqe->res);
 		assert(gcp->flags & GWP_CONN_FLAG_IS_CANCEL);
 		r = 0;
