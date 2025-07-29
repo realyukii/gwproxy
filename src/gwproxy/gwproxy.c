@@ -1241,6 +1241,79 @@ int gwp_socks5_prep_connect_reply(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 }
 
 __hot
+static int handle_socks5_connect_domain_async(struct gwp_wrk *w,
+					      struct gwp_conn_pair *gcp,
+					      const char *host,
+					      const char *port)
+{
+	struct gwp_dns_ctx *dns = w->ctx->dns;
+	struct gwp_dns_entry *gde;
+
+	gde = gwp_dns_queue(dns, host, port);
+	if (unlikely(!gde)) {
+		pr_err(&w->ctx->lh, "Failed to allocate DNS entry for %s:%s", host, port);
+		return -ENOMEM;
+	}
+
+	gcp->conn_state = CONN_STATE_SOCKS5_DNS_QUERY;
+	gcp->gde = gde;
+	return -EINPROGRESS;
+}
+
+static int socks5_prepare_target_addr_domain(struct gwp_wrk *w,
+					     struct gwp_conn_pair *gcp)
+{
+	struct gwp_ctx *ctx = w->ctx;
+	struct gwp_socks5_addr *dst;
+	const char *host;
+	char portstr[6];
+	uint16_t port;
+	int r;
+
+	dst = &gcp->s5_conn->dst_addr;
+	port = ntohs(dst->port);
+	host = dst->domain.str;
+	snprintf(portstr, sizeof(portstr), "%hu", port);
+	r = gwp_dns_cache_lookup(ctx->dns, host, portstr, &gcp->target_addr);
+	if (!r) {
+		pr_dbg(&ctx->lh, "Found %s:%s in DNS cache %s", host, portstr,
+			ip_to_str(&gcp->target_addr));
+		return 0;
+	}
+
+	return handle_socks5_connect_domain_async(w, gcp, host, portstr);
+}
+
+int gwp_socks5_prepare_target_addr(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	struct gwp_sockaddr *ta = &gcp->target_addr;
+	struct gwp_socks5_conn *sc = gcp->s5_conn;
+	struct gwp_socks5_addr *dst;
+
+	assert(sc);
+	assert(sc->state == GWP_SOCKS5_ST_CMD_CONNECT);
+
+	dst = &sc->dst_addr;
+	memset(ta, 0, sizeof(*ta));
+	switch (dst->ver) {
+	case GWP_SOCKS5_ATYP_IPV4:
+		memcpy(&ta->i4.sin_addr, &dst->ip4, 4);
+		ta->i4.sin_port = dst->port;
+		ta->i4.sin_family = AF_INET;
+		return 0;
+	case GWP_SOCKS5_ATYP_IPV6:
+		memcpy(&ta->i6.sin6_addr, &dst->ip6, 16);
+		ta->i6.sin6_port = dst->port;
+		ta->i6.sin6_family = AF_INET6;
+		return 0;
+	case GWP_SOCKS5_ATYP_DOMAIN:
+		return socks5_prepare_target_addr_domain(w, gcp);
+	}
+
+	return -ENOSYS;
+}
+
+__hot
 int gwp_socks5_handle_data(struct gwp_conn_pair *gcp)
 {
 	struct gwp_socks5_conn *sc = gcp->s5_conn;

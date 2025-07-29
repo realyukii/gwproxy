@@ -697,95 +697,6 @@ static int handle_ev_timer(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 }
 
 __hot
-static int handle_socks5_connect_domain_async(struct gwp_wrk *w,
-					      struct gwp_conn_pair *gcp,
-					      const char *host,
-					      const char *port)
-{
-	struct gwp_dns_ctx *dns = w->ctx->dns;
-	struct gwp_dns_entry *gde;
-	struct epoll_event ev;
-	int r;
-
-	gde = gwp_dns_queue(dns, host, port);
-	if (unlikely(!gde)) {
-		pr_err(&w->ctx->lh, "Failed to allocate DNS entry for %s:%s", host, port);
-		return -ENOMEM;
-	}
-
-	ev.events = EPOLLIN;
-	ev.data.u64 = 0;
-	ev.data.ptr = gcp;
-	ev.data.u64 |= EV_BIT_DNS_QUERY;
-	r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_ADD, gde->ev_fd, &ev);
-	if (unlikely(r)) {
-		gwp_dns_entry_put(gde);
-		return r;
-	}
-
-	gcp->conn_state = CONN_STATE_SOCKS5_DNS_QUERY;
-	gcp->gde = gde;
-	return -EINPROGRESS;
-}
-
-static int socks5_prepare_target_addr_domain(struct gwp_wrk *w,
-					     struct gwp_conn_pair *gcp)
-{
-	struct gwp_ctx *ctx = w->ctx;
-	struct gwp_socks5_addr *dst;
-	const char *host;
-	char portstr[6];
-	uint16_t port;
-	int r;
-
-	dst = &gcp->s5_conn->dst_addr;
-	port = ntohs(dst->port);
-	host = dst->domain.str;
-	snprintf(portstr, sizeof(portstr), "%hu", port);
-	r = gwp_dns_cache_lookup(ctx->dns, host, portstr, &gcp->target_addr);
-	if (!r) {
-		/*
-		 * Found the address in the DNS cache!
-		 */
-		pr_dbg(&ctx->lh, "Found %s:%s in DNS cache %s", host, portstr,
-			ip_to_str(&gcp->target_addr));
-		return 0;
-	}
-
-	return handle_socks5_connect_domain_async(w, gcp, host, portstr);
-}
-
-static int socks5_prepare_target_addr(struct gwp_wrk *w,
-				      struct gwp_conn_pair *gcp)
-{
-	struct gwp_sockaddr *ta = &gcp->target_addr;
-	struct gwp_socks5_conn *sc = gcp->s5_conn;
-	struct gwp_socks5_addr *dst;
-
-	assert(sc);
-	assert(sc->state == GWP_SOCKS5_ST_CMD_CONNECT);
-
-	dst = &sc->dst_addr;
-	memset(ta, 0, sizeof(*ta));
-	switch (dst->ver) {
-	case GWP_SOCKS5_ATYP_IPV4:
-		memcpy(&ta->i4.sin_addr, &dst->ip4, 4);
-		ta->i4.sin_port = dst->port;
-		ta->i4.sin_family = AF_INET;
-		return 0;
-	case GWP_SOCKS5_ATYP_IPV6:
-		memcpy(&ta->i6.sin6_addr, &dst->ip6, 16);
-		ta->i6.sin6_port = dst->port;
-		ta->i6.sin6_family = AF_INET6;
-		return 0;
-	case GWP_SOCKS5_ATYP_DOMAIN:
-		return socks5_prepare_target_addr_domain(w, gcp);
-	}
-
-	return -ENOSYS;
-}
-
-__hot
 static int handle_socks5_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct epoll_event ev;
@@ -887,6 +798,28 @@ static int handle_socks5_pollout(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	return -EAGAIN;
 }
 
+static int arm_poll_for_dns_query(struct gwp_wrk *w,
+					struct gwp_conn_pair *gcp)
+{
+	struct gwp_dns_entry *gde = gcp->gde;
+	struct epoll_event ev;
+	int r;
+
+	assert(gde);
+	assert(gde->ev_fd >= 0);
+
+	ev.events = EPOLLIN;
+	ev.data.u64 = 0;
+	ev.data.ptr = gcp;
+	ev.data.u64 |= EV_BIT_DNS_QUERY;
+
+	r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_ADD, gde->ev_fd, &ev);
+	if (unlikely(r))
+		return r;
+
+	return 0;
+}
+
 static int handle_socks5_data(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	int r;
@@ -896,9 +829,11 @@ static int handle_socks5_data(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		return r;
 
 	if (gcp->s5_conn->state == GWP_SOCKS5_ST_CMD_CONNECT) {
-		r = socks5_prepare_target_addr(w, gcp);
-		if (r)
-			return (r == -EINPROGRESS) ? 0 : r;
+		r = gwp_socks5_prepare_target_addr(w, gcp);
+		if (r == -EINPROGRESS)
+			return arm_poll_for_dns_query(w, gcp);
+		else if (r)
+			return r;
 
 		r = handle_socks5_connect(w, gcp);
 	}
