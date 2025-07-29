@@ -4,3 +4,5 @@
 /.vscode/
 *.so
 *.t
+*.patch
+*.a

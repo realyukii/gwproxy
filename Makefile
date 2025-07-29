@@ -9,6 +9,7 @@ LIBS = -lpthread
 DEPFLAGS = -MMD -MP -MF $@.d
 LDFLAGS_SHARED = $(LDFLAGS) -shared -fpic -fPIC
 GWPROXY_DIR = ./src/gwproxy
+LIBURING_DIR = ./src/liburing
 
 ifeq ($(SANITIZE),1)
 	CFLAGS += -fsanitize=address -fsanitize=undefined
@@ -30,8 +31,20 @@ ifeq ($(STATIC),1)
 	LDFLAGS += -static
 endif
 
+LIBURING_TARGET = $(LIBURING_DIR)/src/liburing.a
+
 GWPROXY_TARGET = gwproxy
-GWPROXY_CC_SOURCES = $(GWPROXY_DIR)/gwproxy.c
+GWPROXY_CC_SOURCES = \
+	$(GWPROXY_DIR)/gwproxy.c \
+	$(GWPROXY_DIR)/log.c \
+	$(GWPROXY_DIR)/ev/epoll.c
+
+
+ifeq ($(CONFIG_IO_URING),1)
+	CFLAGS += -DCONFIG_IO_URING
+	GWPROXY_CC_SOURCES += $(GWPROXY_DIR)/ev/io_uring.c
+endif
+
 GWPROXY_OBJECTS = $(GWPROXY_CC_SOURCES:%.c=%.c.o)
 
 LIBGWPSOCKS5_TARGET = libgwpsocks5.so
@@ -57,7 +70,13 @@ ALL_GWPROXY_OBJECTS = $(GWPROXY_OBJECTS) $(LIBGWPSOCKS5_OBJECTS) $(LIBGWDNS_OBJE
 
 all: $(GWPROXY_TARGET) $(LIBGWPSOCKS5_TARGET) $(LIBGWDNS_TARGET)
 
-$(GWPROXY_TARGET): $(ALL_GWPROXY_OBJECTS)
+$(LIBURING_DIR)/Makefile:
+	git submodule update --init --recursive;
+
+$(LIBURING_TARGET): $(LIBURING_DIR)/Makefile
+	@$(MAKE) -C $(LIBURING_DIR) library
+
+$(GWPROXY_TARGET): $(ALL_GWPROXY_OBJECTS) $(LIBURING_TARGET)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 $(LIBGWPSOCKS5_TARGET): $(LIBGWPSOCKS5_OBJECTS)
@@ -81,6 +100,9 @@ TO_BE_REMOVED = $(ALL_OBJECTS) $(ALL_TARGETS) $(ALL_DEPFILES)
 
 clean:
 	rm -f $(TO_BE_REMOVED)
+ifeq ($(CONFIG_IO_URING),1)
+	@$(MAKE) -C $(LIBURING_DIR) clean
+endif
 
 IE=LD_LIBRARY_PATH=$(LD_LIBRARY_PATH):$(shell pwd)
 test: $(LIBGWDNS_TEST_TARGET) $(LIBGWPSOCKS5_TEST_TARGET)

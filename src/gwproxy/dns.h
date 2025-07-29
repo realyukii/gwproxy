@@ -31,6 +31,7 @@ struct gwp_dns_entry {
 };
 
 enum {
+	GWP_DNS_RESTYP_DEFAULT		= 0,
 	GWP_DNS_RESTYP_IPV4_ONLY	= 1,
 	GWP_DNS_RESTYP_IPV6_ONLY	= 2,
 	GWP_DNS_RESTYP_PREFER_IPV4	= 3,
