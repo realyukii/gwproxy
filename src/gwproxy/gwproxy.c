@@ -1158,6 +1158,88 @@ int gwp_create_timer(int fd, int sec, int nsec)
 	return fd;
 }
 
+static int socks5_translate_err(int err)
+{
+	switch (err) {
+	case 0:
+		return GWP_SOCKS5_REP_SUCCESS;
+	case -EPERM:
+	case -EACCES:
+		return GWP_SOCKS5_REP_NOT_ALLOWED;
+	case -ENETUNREACH:
+		return GWP_SOCKS5_REP_NETWORK_UNREACHABLE;
+	case -EHOSTUNREACH:
+		return GWP_SOCKS5_REP_HOST_UNREACHABLE;
+	case -ECONNREFUSED:
+		return GWP_SOCKS5_REP_CONN_REFUSED;
+	case -ETIMEDOUT:
+		return GWP_SOCKS5_REP_TTL_EXPIRED;
+	default:
+		return GWP_SOCKS5_REP_FAILURE;
+	}
+}
+
+static int get_local_addr_for_socks5(struct gwp_ctx *ctx, int fd,
+				     struct gwp_socks5_addr *ba)
+{
+	struct gwp_sockaddr t;
+	socklen_t len = sizeof(t);
+	int r;
+
+	r = __sys_getsockname(fd, &t.sa, &len);
+	if (r < 0) {
+		pr_err(&ctx->lh, "getsockname error: %s", strerror(-r));
+		return r;
+	}
+
+	switch (t.sa.sa_family) {
+	case AF_INET:
+		ba->ver = GWP_SOCKS5_ATYP_IPV4;
+		memcpy(&ba->ip4, &t.i4.sin_addr, 4);
+		ba->port = ntohs(t.i4.sin_port);
+		return 0;
+	case AF_INET6:
+		ba->ver = GWP_SOCKS5_ATYP_IPV6;
+		memcpy(&ba->ip6, &t.i6.sin6_addr, 16);
+		ba->port = ntohs(t.i6.sin6_port);
+		return 0;
+	default:
+		pr_err(&ctx->lh, "Unsupported address family %d for local socket",
+			t.sa.sa_family);
+		return -EAFNOSUPPORT;
+	}
+}
+
+__hot
+int gwp_socks5_prep_connect_reply(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
+				  int err)
+{
+	struct gwp_socks5_conn *sc = gcp->s5_conn;
+	struct gwp_socks5_addr ba;
+	size_t out_len;
+	void *out;
+	int r;
+
+	if (err == 0) {
+		r = get_local_addr_for_socks5(w->ctx, gcp->target.fd, &ba);
+		if (unlikely(r))
+			return r;
+	} else {
+		memset(&ba, 0, sizeof(ba));
+		ba.ver = GWP_SOCKS5_ATYP_IPV4;
+	}
+
+	err = socks5_translate_err(err);
+	out = gcp->target.buf + gcp->target.len;
+	out_len = gcp->target.cap - gcp->target.len;
+	r = gwp_socks5_conn_cmd_connect_res(sc, &ba, err, out, &out_len);
+	if (r < 0)
+		return r;
+
+	gcp->target.len += out_len;
+	return 0;
+}
+
 noinline
 static void *gwp_ctx_thread_entry(void *arg)
 {

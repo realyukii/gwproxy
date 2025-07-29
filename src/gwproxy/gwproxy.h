@@ -211,4 +211,7 @@ void log_conn_pair_created(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		ip_to_str(&gcp->client_addr), ip_to_str(&gcp->target_addr));
 }
 
+int gwp_socks5_prep_connect_reply(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
+				  int err);
+
 #endif /* #ifndef GWPROXY_H */
