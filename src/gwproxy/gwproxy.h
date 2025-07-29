@@ -99,7 +99,7 @@ enum {
 	 */
 	GWP_CONN_FLAG_NO_CLOSE_FD	= (1ull << 0ull),
 	GWP_CONN_FLAG_IS_DYING		= (1ull << 1ull),
-	GWP_CONN_FLAG_IS_SHUTDOWN	= (1ull << 2ull),
+	GWP_CONN_FLAG_IS_CANCEL		= (1ull << 2ull),
 };
 
 struct gwp_conn_pair {

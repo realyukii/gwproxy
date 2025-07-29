@@ -318,7 +318,7 @@ static void shutdown_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	struct gwp_ctx *ctx = w->ctx;
 	struct io_uring_sqe *s;
 
-	if (gcp->flags & GWP_CONN_FLAG_IS_SHUTDOWN)
+	if (gcp->flags & GWP_CONN_FLAG_IS_CANCEL)
 		return;
 
 	if (gcp->target.fd >= 0) {
@@ -339,7 +339,7 @@ static void shutdown_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		get_gcp(gcp);
 	}
 
-	gcp->flags |= GWP_CONN_FLAG_IS_SHUTDOWN;
+	gcp->flags |= GWP_CONN_FLAG_IS_CANCEL;
 }
 
 static int arm_gcp(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
@@ -640,7 +640,7 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 		break;
 	case EV_BIT_TARGET_CANCEL:
 		pr_dbg(&ctx->lh, "Handling target cancel event: %d", cqe->res);
-		assert(gcp->flags & GWP_CONN_FLAG_IS_SHUTDOWN);
+		assert(gcp->flags & GWP_CONN_FLAG_IS_CANCEL);
 		r = 0;
 		break;
 	case EV_BIT_CLIENT_CANCEL:
@@ -661,7 +661,7 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 	gcp = udata;
 
 	if ((gcp->flags & GWP_CONN_FLAG_IS_DYING) &&
-	    !(gcp->flags & GWP_CONN_FLAG_IS_SHUTDOWN))
+	    !(gcp->flags & GWP_CONN_FLAG_IS_CANCEL))
 		shutdown_gcp(w, gcp);
 
 	put_gcp(w, gcp);
