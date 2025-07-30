@@ -39,12 +39,6 @@ GWPROXY_CC_SOURCES = \
 	$(GWPROXY_DIR)/log.c \
 	$(GWPROXY_DIR)/ev/epoll.c
 
-
-ifeq ($(CONFIG_IO_URING),1)
-	CFLAGS += -DCONFIG_IO_URING
-	GWPROXY_CC_SOURCES += $(GWPROXY_DIR)/ev/io_uring.c
-endif
-
 GWPROXY_OBJECTS = $(GWPROXY_CC_SOURCES:%.c=%.c.o)
 
 LIBGWPSOCKS5_TARGET = libgwpsocks5.so
@@ -94,6 +88,10 @@ include config.make
 endif
 endif
 
+ifeq ($(CONFIG_IO_URING),y)
+	GWPROXY_CC_SOURCES += $(GWPROXY_DIR)/ev/io_uring.c
+	ALL_GWPROXY_OBJECTS += $(LIBURING_TARGET)
+
 $(LIBURING_DIR)/Makefile:
 	git submodule update --init --recursive;
 
@@ -102,8 +100,9 @@ ifeq ($(SANITIZE),1)
 	cd $(LIBURING_DIR) && ./configure --enable-sanitizer;
 endif
 	@$(MAKE) -C $(LIBURING_DIR) library
+endif # ifeq ($(CONFIG_IO_URING),y)
 
-$(GWPROXY_TARGET): $(ALL_GWPROXY_OBJECTS) $(LIBURING_TARGET)
+$(GWPROXY_TARGET): $(ALL_GWPROXY_OBJECTS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 $(LIBGWPSOCKS5_TARGET): $(LIBGWPSOCKS5_OBJECTS)
@@ -123,11 +122,11 @@ $(LIBGWDNS_TEST_TARGET): $(LIBGWDNS_TEST_OBJECTS) $(LIBGWDNS_TARGET)
 
 -include $(ALL_DEPFILES)
 
-TO_BE_REMOVED = $(ALL_OBJECTS) $(ALL_TARGETS) $(ALL_DEPFILES) config.make config.log config.h
+TO_BE_REMOVED = $(ALL_OBJECTS) $(ALL_TARGETS) $(ALL_DEPFILES)
 
 clean:
 	rm -f $(TO_BE_REMOVED)
-ifeq ($(CONFIG_IO_URING),1)
+ifeq ($(CONFIG_IO_URING),y)
 	@$(MAKE) -C $(LIBURING_DIR) clean
 endif
 

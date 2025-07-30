@@ -34,6 +34,9 @@ for opt do
 	--cxx=*)
 		cxx="$optarg";
 	;;
+	--use-io-uring)
+		use_io_uring="yes";
+	;;
 	--debug)
 		use_debug="yes";
 	;;
@@ -318,7 +321,9 @@ add_c_and_cxx_flag "-ggdb3" && LDFLAGS="-ggdb3 ${LDFLAGS}";
 # Bring it back!
 set -e;
 printf "\n%s:\n" "CONFIG";
-add_config "CONFIG_IO_URING";
+if test "${use_io_uring}" = "yes"; then
+	add_config "CONFIG_IO_URING";
+fi;
 add_config "CONFIG_LINUX";
 
 if test "${use_debug}" = "yes"; then
