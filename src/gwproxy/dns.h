@@ -114,4 +114,9 @@ bool gwp_dns_entry_put(struct gwp_dns_entry *entry);
 int gwp_dns_cache_lookup(struct gwp_dns_ctx *ctx, const char *name,
 			 const char *service, struct gwp_sockaddr *addr);
 
+
+int gwp_dns_resolve(struct gwp_dns_ctx *ctx, const char *name,
+		    const char *service, struct gwp_sockaddr *addr,
+		    uint32_t restyp);
+
 #endif /* #ifndef GWP_DNS_H */
