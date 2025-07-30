@@ -234,6 +234,7 @@ static void wait_for_queue_entry(struct gwp_dns_ctx *ctx)
 	cond_scan_cache(ctx);
 }
 
+#ifdef CONFIG_HAVE_GETADDRINFO_A
 /*
  * Must be called with ctx->lock held.
  */
@@ -429,6 +430,7 @@ static void process_queue_entry_batch(struct gwp_dns_ctx *ctx)
 	put_all_entries(head);
 	pthread_mutex_lock(&ctx->lock);
 }
+#endif /* #ifdef CONFIG_HAVE_GETADDRINFO_A */
 
 /*
  * Must be called with ctx->lock held. May release the lock, but
@@ -490,10 +492,14 @@ static void process_queue_entry(struct gwp_dns_ctx *ctx)
 	 * clone() for each entry if we can process them in the current
 	 * thread.
 	 */
-	if (ctx->nr_entries > (ctx->nr_sleeping + 16))
+#ifdef CONFIG_HAVE_GETADDRINFO_A
+	if (ctx->nr_entries > (ctx->nr_sleeping + 16)) {
 		process_queue_entry_batch(ctx);
-	else
-		process_queue_entry_single(ctx);
+		return;
+	}
+#endif
+
+	process_queue_entry_single(ctx);
 }
 
 static void *gwp_dns_thread_entry(void *arg)
