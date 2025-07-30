@@ -3,11 +3,9 @@ ifndef OPTIMIZE
 	OPTIMIZE = -O2
 endif
 INCLUDE_FLAGS = -I./src/
-CFLAGS = -Wall -Wextra -ggdb3 $(OPTIMIZE) -fno-stack-protector -fpic -fPIC $(INCLUDE_FLAGS)
-LDFLAGS = -ggdb3 $(OPTIMIZE)
 LIBS = -lpthread
 DEPFLAGS = -MMD -MP -MF $@.d
-LDFLAGS_SHARED = $(LDFLAGS) -shared -fpic -fPIC
+LDFLAGS_SHARED = $(LDFLAGS) -shared
 GWPROXY_DIR = ./src/gwproxy
 LIBURING_DIR = ./src/liburing
 
