@@ -77,9 +77,9 @@ config.make: configure
 	      sed -n "/.*Configured with/s/[^:]*: //p" "$@" | sh;	\
 	fi;
 
-include config.make
 endif
 endif
+-include config.make
 
 ifeq ($(CONFIG_IO_URING),y)
 	GWPROXY_CC_SOURCES += $(GWPROXY_DIR)/ev/io_uring.c
