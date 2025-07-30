@@ -109,7 +109,7 @@ struct gwp_conn_pair {
 	struct gwp_conn		client;
 	bool			is_target_alive;
 
-#if CONFIG_IO_URING
+#ifdef CONFIG_IO_URING
 	int				ref_cnt;
 	struct __kernel_timespec	ts;
 #endif

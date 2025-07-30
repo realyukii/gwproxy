@@ -70,6 +70,30 @@ ALL_GWPROXY_OBJECTS = $(GWPROXY_OBJECTS) $(LIBGWPSOCKS5_OBJECTS) $(LIBGWDNS_OBJE
 
 all: $(GWPROXY_TARGET) $(LIBGWPSOCKS5_TARGET) $(LIBGWDNS_TARGET)
 
+ifneq ($(MAKECMDGOALS),clean)
+ifneq ($(MAKECMDGOALS),distclean)
+config.make: configure
+	@if [ ! -e "$@" ]; then						\
+	  echo "Running configure ...";					\
+	  LDFLAGS="$(USER_LDFLAGS)"					\
+	      LIB_LDFLAGS="$(USER_LIB_LDFLAGS)"				\
+	      CFLAGS="$(USER_CFLAGS)" 					\
+	      CXXFLAGS="$(USER_CXXFLAGS)"				\
+	      ./configure;						\
+	else								\
+	  echo "$@ is out-of-date";					\
+	  echo "Running configure ...";					\
+	  LDFLAGS="$(USER_LDFLAGS)"					\
+	      LIB_LDFLAGS="$(USER_LIB_LDFLAGS)"				\
+	      CFLAGS="$(USER_CFLAGS)" 					\
+	      CXXFLAGS="$(USER_CXXFLAGS)"				\
+	      sed -n "/.*Configured with/s/[^:]*: //p" "$@" | sh;	\
+	fi;
+
+include config.make
+endif
+endif
+
 $(LIBURING_DIR)/Makefile:
 	git submodule update --init --recursive;
 
@@ -99,7 +123,7 @@ $(LIBGWDNS_TEST_TARGET): $(LIBGWDNS_TEST_OBJECTS) $(LIBGWDNS_TARGET)
 
 -include $(ALL_DEPFILES)
 
-TO_BE_REMOVED = $(ALL_OBJECTS) $(ALL_TARGETS) $(ALL_DEPFILES)
+TO_BE_REMOVED = $(ALL_OBJECTS) $(ALL_TARGETS) $(ALL_DEPFILES) config.make config.log config.h
 
 clean:
 	rm -f $(TO_BE_REMOVED)

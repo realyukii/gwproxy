@@ -6,3 +6,6 @@
 *.t
 *.patch
 *.a
+/config.h
+/config.log
+/config.make
