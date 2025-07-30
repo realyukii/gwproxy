@@ -530,13 +530,13 @@ static int do_splice(struct gwp_conn *src, struct gwp_conn *dst, bool do_recv,
 	if (do_recv) {
 		ret = __do_recv(src);
 		if (unlikely(ret < 0))
-			return ret;
+			return (int)ret;
 	}
 
 	if (do_send) {
 		ret = __do_send(src, dst);
 		if (unlikely(ret < 0))
-			return ret;
+			return (int)ret;
 	}
 
 	return 0;
@@ -554,7 +554,7 @@ static int prep_and_send_socks5_rep_connect(struct gwp_wrk *w,
 	if (gcp->target.len) {
 		sr = __do_send(&gcp->target, &gcp->client);
 		if (unlikely(sr < 0))
-			return sr;
+			return (int)sr;
 	}
 
 	return r;
@@ -605,7 +605,7 @@ static int handle_ev_target_conn_result(struct gwp_wrk *w,
 	if (gcp->client.len) {
 		sr = __do_send(&gcp->client, &gcp->target);
 		if (unlikely(sr < 0))
-			return sr;
+			return (int)sr;
 	}
 
 	return adjust_epl_mask(w, gcp);
@@ -781,7 +781,7 @@ static int handle_socks5_pollout(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 
 	sr = __do_send(&gcp->target, &gcp->client);
 	if (unlikely(sr < 0))
-		return sr;
+		return (int)sr;
 
 	if (likely(!adj_epl_out(&gcp->target, &gcp->client)))
 		return 0;
@@ -871,7 +871,7 @@ static int handle_ev_client_socks5(struct gwp_wrk *w,
 		 * epoll_wait() before continuing.
 		 */
 		if (unlikely(sr <= 0))
-			return sr;
+			return (int)sr;
 	}
 
 	if (gcp->conn_state == CONN_STATE_SOCKS5_DATA) {
@@ -949,8 +949,8 @@ static int handle_ev_socks5_auth_file(struct gwp_wrk *w)
 		if (r == -EINTR || r == -EAGAIN)
 			return 0;
 
-		pr_err(&w->ctx->lh, "Failed to read inotify event: %s", strerror(-r));
-		return r;
+		pr_err(&w->ctx->lh, "Failed to read inotify event: %s", strerror((int)-r));
+		return (int)r;
 	}
 
 	gwp_socks5_auth_reload(w->ctx->socks5);
