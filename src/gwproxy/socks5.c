@@ -731,7 +731,7 @@ static int set_err_reply(struct data_arg *d, uint8_t err_code)
  *      DST.PORT fields contain the address and port that the client expects
  *      to use to send UDP datagrams on for the association.  The server MAY
  *      use this information to limit access to the association.  If the
- *      client is not in possesion of the information at the time of the UDP
+ *      client is not in possession of the information at the time of the UDP
  *      ASSOCIATE, the client MUST use a port number and address of all
  *      zeros.
  *
