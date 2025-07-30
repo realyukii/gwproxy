@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <time.h>
 
 struct gwp_dns_cache_entry {
 	/**

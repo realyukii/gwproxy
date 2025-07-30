@@ -3,18 +3,11 @@ ifndef OPTIMIZE
 	OPTIMIZE = -O2
 endif
 INCLUDE_FLAGS = -I./src/
-CFLAGS = -Wall -Wextra -ggdb3 $(OPTIMIZE) -fno-stack-protector -fpic -fPIC $(INCLUDE_FLAGS)
-LDFLAGS = -ggdb3 $(OPTIMIZE)
 LIBS = -lpthread
 DEPFLAGS = -MMD -MP -MF $@.d
-LDFLAGS_SHARED = $(LDFLAGS) -shared -fpic -fPIC
+LDFLAGS_SHARED = $(LDFLAGS) -shared
 GWPROXY_DIR = ./src/gwproxy
 LIBURING_DIR = ./src/liburing
-
-ifeq ($(SANITIZE),1)
-	CFLAGS += -fsanitize=address -fsanitize=undefined
-	LDFLAGS += -fsanitize=address -fsanitize=undefined
-endif
 
 ifeq ($(DEBUG),1)
 	CFLAGS += -DDEBUG
@@ -38,12 +31,6 @@ GWPROXY_CC_SOURCES = \
 	$(GWPROXY_DIR)/gwproxy.c \
 	$(GWPROXY_DIR)/log.c \
 	$(GWPROXY_DIR)/ev/epoll.c
-
-
-ifeq ($(CONFIG_IO_URING),1)
-	CFLAGS += -DCONFIG_IO_URING
-	GWPROXY_CC_SOURCES += $(GWPROXY_DIR)/ev/io_uring.c
-endif
 
 GWPROXY_OBJECTS = $(GWPROXY_CC_SOURCES:%.c=%.c.o)
 
@@ -70,28 +57,68 @@ ALL_GWPROXY_OBJECTS = $(GWPROXY_OBJECTS) $(LIBGWPSOCKS5_OBJECTS) $(LIBGWDNS_OBJE
 
 all: $(GWPROXY_TARGET) $(LIBGWPSOCKS5_TARGET) $(LIBGWDNS_TARGET)
 
+ifneq ($(MAKECMDGOALS),clean)
+ifneq ($(MAKECMDGOALS),distclean)
+config.make: configure
+	@if [ ! -e "$@" ]; then						\
+	  echo "Running configure ...";					\
+	  LDFLAGS="$(USER_LDFLAGS)"					\
+	      LIB_LDFLAGS="$(USER_LIB_LDFLAGS)"				\
+	      CFLAGS="$(USER_CFLAGS)" 					\
+	      CXXFLAGS="$(USER_CXXFLAGS)"				\
+	      ./configure;						\
+	else								\
+	  echo "$@ is out-of-date";					\
+	  echo "Running configure ...";					\
+	  LDFLAGS="$(USER_LDFLAGS)"					\
+	      LIB_LDFLAGS="$(USER_LIB_LDFLAGS)"				\
+	      CFLAGS="$(USER_CFLAGS)" 					\
+	      CXXFLAGS="$(USER_CXXFLAGS)"				\
+	      sed -n "/.*Configured with/s/[^:]*: //p" "$@" | sh;	\
+	fi;
+
+endif
+endif
+-include config.make
+
+ifeq ($(CONFIG_IO_URING),y)
+	GWPROXY_CC_SOURCES += $(GWPROXY_DIR)/ev/io_uring.c
+	ALL_GWPROXY_OBJECTS += $(LIBURING_TARGET)
+
+# Make sure to build liburing first as it needs liburing.h.
+	EXTRA_DEPS += $(LIBURING_TARGET)
+
 $(LIBURING_DIR)/Makefile:
 	git submodule update --init --recursive;
 
 $(LIBURING_TARGET): $(LIBURING_DIR)/Makefile
+ifeq ($(CONFIG_SANITIZE),y)
+	cd $(LIBURING_DIR) && ./configure --enable-sanitizer;
+endif
 	@$(MAKE) -C $(LIBURING_DIR) library
+endif # ifeq ($(CONFIG_IO_URING),y)
 
-$(GWPROXY_TARGET): $(ALL_GWPROXY_OBJECTS) $(LIBURING_TARGET)
+$(GWPROXY_TARGET): $(ALL_GWPROXY_OBJECTS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
+
+#
+# TODO(*): Test against the *.so files. Currently, the tests in
+#          `tests/` are built against the static objects.
+#
 $(LIBGWPSOCKS5_TARGET): $(LIBGWPSOCKS5_OBJECTS)
 	$(CC) $(LDFLAGS_SHARED) -o $@ $^ $(LIBS)
 
-$(LIBGWPSOCKS5_TEST_TARGET): $(LIBGWPSOCKS5_TEST_OBJECTS) $(LIBGWPSOCKS5_TARGET)
+$(LIBGWPSOCKS5_TEST_TARGET): $(LIBGWPSOCKS5_OBJECTS) $(LIBGWPSOCKS5_TEST_OBJECTS) $(LIBGWPSOCKS5_TARGET)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 $(LIBGWDNS_TARGET): $(LIBGWDNS_OBJECTS)
 	$(CC) $(LDFLAGS_SHARED) -o $@ $^ $(LIBS)
 
-$(LIBGWDNS_TEST_TARGET): $(LIBGWDNS_TEST_OBJECTS) $(LIBGWDNS_TARGET)
+$(LIBGWDNS_TEST_TARGET): $(LIBGWDNS_OBJECTS) $(LIBGWDNS_TEST_OBJECTS) $(LIBGWDNS_TARGET)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
-%.c.o: %.c
+%.c.o: %.c $(EXTRA_DEPS)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 -include $(ALL_DEPFILES)
@@ -100,7 +127,7 @@ TO_BE_REMOVED = $(ALL_OBJECTS) $(ALL_TARGETS) $(ALL_DEPFILES)
 
 clean:
 	rm -f $(TO_BE_REMOVED)
-ifeq ($(CONFIG_IO_URING),1)
+ifeq ($(CONFIG_IO_URING),y)
 	@$(MAKE) -C $(LIBURING_DIR) clean
 endif
 

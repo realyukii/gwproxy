@@ -253,23 +253,6 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 
 #define FULL_ADDRSTRLEN (INET6_ADDRSTRLEN + sizeof(":65535[]") - 1)
 
-static inline ssize_t gwp_eventfd_write(int fd, uint64_t val)
-{
-	uint64_t v = val;
-	ssize_t r;
-
-	do {
-		r = __sys_write(fd, &v, sizeof(v));
-	} while (r < 0 && r == -EINTR);
-
-	if (r < 0)
-		return r;
-	if (r != sizeof(v))
-		return -EIO;
-
-	return 0;
-}
-
 __hot
 static int convert_ssaddr_to_str(char buf[FULL_ADDRSTRLEN],
 				 const struct gwp_sockaddr *gs)
@@ -933,7 +916,7 @@ static int expand_conn_slot(struct gwp_wrk *w)
 	struct gwp_ctx *ctx = w->ctx;
 
 	if (gcs->nr >= gcs->cap) {
-		size_t new_cap = gcs->cap ? gcs->cap * 2 : 16;
+		uint32_t new_cap = gcs->cap ? gcs->cap * 2 : 16;
 		struct gwp_conn_pair **new_pairs;
 
 		new_pairs = realloc(gcs->pairs, new_cap * sizeof(*new_pairs));
@@ -942,7 +925,7 @@ static int expand_conn_slot(struct gwp_wrk *w)
 
 		gcs->pairs = new_pairs;
 		gcs->cap = new_cap;
-		pr_dbg(&ctx->lh, "Increased connection slot capacity to %zu", gcs->cap);
+		pr_dbg(&ctx->lh, "Increased connection slot capacity to %u", gcs->cap);
 	}
 
 	return 0;
@@ -994,7 +977,7 @@ static int shrink_conn_slot(struct gwp_wrk *w)
 	struct gwp_conn_slot *gcs = &w->conn_slot;
 	struct gwp_conn_pair **new_pairs;
 	struct gwp_ctx *ctx = w->ctx;
-	size_t new_cap;
+	uint32_t new_cap;
 
 	if (!gcs->pairs)
 		return 0;
@@ -1018,7 +1001,7 @@ static int shrink_conn_slot(struct gwp_wrk *w)
 	}
 	gcs->pairs = new_pairs;
 	gcs->cap = new_cap;
-	pr_dbg(&ctx->lh, "Connection slot capacity shrunk to %zu", gcs->cap);
+	pr_dbg(&ctx->lh, "Connection slot capacity shrunk to %u", gcs->cap);
 	return 0;
 }
 

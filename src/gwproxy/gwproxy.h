@@ -109,7 +109,7 @@ struct gwp_conn_pair {
 	struct gwp_conn		client;
 	bool			is_target_alive;
 
-#if CONFIG_IO_URING
+#ifdef CONFIG_IO_URING
 	int				ref_cnt;
 	struct __kernel_timespec	ts;
 #endif
@@ -128,8 +128,8 @@ struct gwp_conn_pair {
 
 struct gwp_conn_slot {
 	struct gwp_conn_pair	**pairs;
-	size_t			nr;
-	size_t			cap;
+	uint32_t		nr;
+	uint32_t		cap;
 };
 
 #ifdef CONFIG_IO_URING
