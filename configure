@@ -299,7 +299,7 @@ add_c_and_cxx_flag "-Wunreachable-code-loop-increment";
 add_c_and_cxx_flag "-Wformat-signedness";
 add_c_and_cxx_flag "-Wformat-security";
 add_c_and_cxx_flag "-Wformat";
-add_c_and_cxx_flag "-Wstack-usage=4096";
+add_c_and_cxx_flag "-Wstack-usage=8192";
 add_c_and_cxx_flag "-Wmissing-prototypes";
 add_c_and_cxx_flag "-Wstrict-prototypes";
 add_c_and_cxx_flag "-Wmissing-variable-declarations";
