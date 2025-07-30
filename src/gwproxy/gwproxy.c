@@ -253,23 +253,6 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 
 #define FULL_ADDRSTRLEN (INET6_ADDRSTRLEN + sizeof(":65535[]") - 1)
 
-static inline ssize_t gwp_eventfd_write(int fd, uint64_t val)
-{
-	uint64_t v = val;
-	ssize_t r;
-
-	do {
-		r = __sys_write(fd, &v, sizeof(v));
-	} while (r < 0 && r == -EINTR);
-
-	if (r < 0)
-		return r;
-	if (r != sizeof(v))
-		return -EIO;
-
-	return 0;
-}
-
 __hot
 static int convert_ssaddr_to_str(char buf[FULL_ADDRSTRLEN],
 				 const struct gwp_sockaddr *gs)
