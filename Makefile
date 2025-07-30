@@ -74,6 +74,9 @@ $(LIBURING_DIR)/Makefile:
 	git submodule update --init --recursive;
 
 $(LIBURING_TARGET): $(LIBURING_DIR)/Makefile
+ifeq ($(SANITIZE),1)
+	cd $(LIBURING_DIR) && ./configure --enable-sanitizer;
+endif
 	@$(MAKE) -C $(LIBURING_DIR) library
 
 $(GWPROXY_TARGET): $(ALL_GWPROXY_OBJECTS) $(LIBURING_TARGET)
