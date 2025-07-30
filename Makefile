@@ -9,11 +9,6 @@ LDFLAGS_SHARED = $(LDFLAGS) -shared
 GWPROXY_DIR = ./src/gwproxy
 LIBURING_DIR = ./src/liburing
 
-ifeq ($(SANITIZE),1)
-	CFLAGS += -fsanitize=address -fsanitize=undefined
-	LDFLAGS += -fsanitize=address -fsanitize=undefined
-endif
-
 ifeq ($(DEBUG),1)
 	CFLAGS += -DDEBUG
 else
@@ -94,7 +89,7 @@ $(LIBURING_DIR)/Makefile:
 	git submodule update --init --recursive;
 
 $(LIBURING_TARGET): $(LIBURING_DIR)/Makefile
-ifeq ($(SANITIZE),1)
+ifeq ($(CONFIG_SANITIZE),y)
 	cd $(LIBURING_DIR) && ./configure --enable-sanitizer;
 endif
 	@$(MAKE) -C $(LIBURING_DIR) library

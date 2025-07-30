@@ -37,6 +37,9 @@ for opt do
 	--use-io-uring)
 		use_io_uring="yes";
 	;;
+	--sanitize)
+		use_sanitize="yes";
+	;;
 	--debug)
 		use_debug="yes";
 	;;
@@ -83,6 +86,8 @@ Options: [defaults in brackets after descriptions]
   --cc=CMD                 Use CMD as the C compiler
   --cxx=CMD                Use CMD as the C++ compiler
   --debug                  Build with debug enabled
+  --use-io-uring           Enable io_uring support (default: no)
+  --sanitize               Enable sanitizers (default: no)
 EOF
 exit 0;
 fi
@@ -324,6 +329,20 @@ printf "\n%s:\n" "CONFIG";
 if test "${use_io_uring}" = "yes"; then
 	add_config "CONFIG_IO_URING";
 fi;
+
+if test "${use_sanitize}" = "yes"; then
+	add_config "CONFIG_SANITIZE";
+	if ! add_c_and_cxx_flag "-fsanitize=address"; then
+		fatal "ERROR: -fsanitize=address is not supported by your compiler";
+	fi;
+	if ! add_c_and_cxx_flag "-fsanitize=undefined"; then
+		fatal "ERROR: -fsanitize=undefined is not supported by your compiler";
+	fi;
+	LDFLAGS="${LDFLAGS} -fsanitize=address -fsanitize=undefined";
+	CFLAGS="${CFLAGS} -fsanitize=address -fsanitize=undefined";
+	CXXFLAGS="${CXXFLAGS} -fsanitize=address -fsanitize=undefined";
+fi;
+
 add_config "CONFIG_LINUX";
 
 if test "${use_debug}" = "yes"; then
