@@ -328,6 +328,8 @@ set -e;
 printf "\n%s:\n" "CONFIG";
 if test "${use_io_uring}" = "yes"; then
 	add_config "CONFIG_IO_URING";
+	CFLAGS="${CFLAGS} -I./src/liburing/src/include";
+	CXXFLAGS="${CXXFLAGS} -I./src/liburing/src/include";
 fi;
 
 if test "${use_sanitize}" = "yes"; then

@@ -85,6 +85,9 @@ ifeq ($(CONFIG_IO_URING),y)
 	GWPROXY_CC_SOURCES += $(GWPROXY_DIR)/ev/io_uring.c
 	ALL_GWPROXY_OBJECTS += $(LIBURING_TARGET)
 
+# Make sure to build liburing first as it needs liburing.h.
+	EXTRA_DEPS += $(LIBURING_TARGET)
+
 $(LIBURING_DIR)/Makefile:
 	git submodule update --init --recursive;
 
@@ -115,7 +118,7 @@ $(LIBGWDNS_TARGET): $(LIBGWDNS_OBJECTS)
 $(LIBGWDNS_TEST_TARGET): $(LIBGWDNS_OBJECTS) $(LIBGWDNS_TEST_OBJECTS) $(LIBGWDNS_TARGET)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
-%.c.o: %.c
+%.c.o: %.c $(EXTRA_DEPS)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 -include $(ALL_DEPFILES)
