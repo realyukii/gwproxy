@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <linux/types.h>
 
 enum gwp_socks5_state {
@@ -185,5 +186,9 @@ int gwp_socks5_conn_cmd_connect_res(struct gwp_socks5_conn *conn,
 				    const struct gwp_socks5_addr *bind_addr,
 				    uint8_t rep, void *out_buf,
 				    size_t *out_len);
+
+
+bool gwp_socks5_auth_check(struct gwp_socks5_ctx *ctx, const char *u,
+			   size_t ulen, const char *p, size_t plen);
 
 #endif /* #ifndef GWP_SOCKS5_H */
