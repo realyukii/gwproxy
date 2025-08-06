@@ -149,7 +149,7 @@ jobs:
         if: ${{matrix.build_args.sanitize == '0'}}
         run: |
           make clean;
-          ./configure --cc=${{matrix.build_args.cc}};
+          CFLAGS=-Werror ./configure --cc=${{matrix.build_args.cc}};
           make -j$(nproc);
           # Only test for x86_64
           if [ "${{matrix.build_args.arch}}" = "x86_64" ]; then
@@ -160,7 +160,7 @@ jobs:
         if: ${{matrix.build_args.sanitize == '1'}}
         run: |
           make clean;
-          ./configure --cc=${{matrix.build_args.cc}} --sanitize;
+          CFLAGS=-Werror ./configure --cc=${{matrix.build_args.cc}} --sanitize;
           make -j$(nproc);
           # Only test for x86_64
           if [ "${{matrix.build_args.arch}}" = "x86_64" ]; then
@@ -171,7 +171,7 @@ jobs:
         run: |
           rm -vf config.h config.log config.make;
           make clean;
-          ./configure --use-io-uring;
+          CFLAGS=-Werror ./configure --use-io-uring;
           make -j$(nproc);
           if [ "${{matrix.build_args.arch}}" = "x86_64" ]; then
             make test;
@@ -213,7 +213,7 @@ jobs:
         shell: alpine.sh {0}
         run: |
           make clean;
-          ./configure --cc=gcc;
+          CFLAGS=-Werror ./configure --cc=gcc;
           make -j$(nproc);
           if [ "${{matrix.build_args.arch}}" = "x86_64" ]; then
             make test;
@@ -224,7 +224,7 @@ jobs:
         run: |
           rm -vf config.h config.log config.make;
           make clean;
-          ./configure --cc=gcc --use-io-uring;
+          CFLAGS=-Werror ./configure --cc=gcc --use-io-uring;
           make -j$(nproc);
           if [ "${{matrix.build_args.arch}}" = "x86_64" ]; then
             make test;
