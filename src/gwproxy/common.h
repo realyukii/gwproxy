@@ -34,4 +34,7 @@
 #define __releases(x)
 #endif
 
+#define PTR_TO_U64(x) ((uint64_t)(uintptr_t)(x))
+#define U64_TO_PTR(x) ((void *)(uintptr_t)(x))
+
 #endif /* #ifndef GWPROXY__COMMON_H */

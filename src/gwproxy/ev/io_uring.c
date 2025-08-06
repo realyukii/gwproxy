@@ -324,7 +324,7 @@ static void prep_timer_del_target(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct io_uring_sqe *s = get_sqe_nofail(w);
 
-	io_uring_prep_timeout_remove(s, EV_BIT_TIMER | (uint64_t)gcp, 0);
+	io_uring_prep_timeout_remove(s, EV_BIT_TIMER | PTR_TO_U64(gcp), 0);
 	io_uring_sqe_set_data(s, gcp);
 	s->user_data |= EV_BIT_TIMER_DEL;
 	get_gcp(gcp);
@@ -770,7 +770,7 @@ static int handle_ev_socks5_auth_file(struct gwp_wrk *w)
 
 static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 {
-	void *udata = (void *)CLEAR_EV_BIT(cqe->user_data);
+	void *udata = U64_TO_PTR(CLEAR_EV_BIT(cqe->user_data));
 	uint64_t ev_bit = GET_EV_BIT(cqe->user_data);
 	struct gwp_ctx *ctx = w->ctx;
 	struct gwp_conn_pair *gcp;
@@ -854,8 +854,8 @@ static int handle_event(struct gwp_wrk *w, struct io_uring_cqe *cqe)
 	return 0;
 
 out_bug:
-	pr_err(&ctx->lh, "Bug, invalid %s: res=%d, fd=%ld, s=%s", inv_op,
-		cqe->res, (intptr_t)udata, strerror(-cqe->res));
+	pr_err(&ctx->lh, "Bug, invalid %s: res=%d, udata=%" PRIu64 ", s=%s", inv_op,
+		cqe->res, PTR_TO_U64(udata), strerror(-cqe->res));
 	return cqe->res;
 }
 
