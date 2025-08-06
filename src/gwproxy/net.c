@@ -10,7 +10,8 @@
 #include <gwproxy/common.h>
 
 __cold
-int convert_str_to_ssaddr(const char *str, struct gwp_sockaddr *gs)
+int convert_str_to_ssaddr(const char *str,
+				struct gwp_sockaddr *gs, uint16_t default_port)
 {
 	static const struct addrinfo hints = {
 		.ai_family = AF_UNSPEC,
@@ -27,24 +28,30 @@ int convert_str_to_ssaddr(const char *str, struct gwp_sockaddr *gs)
 		if (!p)
 			return -EINVAL;
 		l = p - str;
-		if (l >= sizeof(host))
-			return -EINVAL;
 		p++;
-		if (*p != ':')
+		if (*p != ':' && !default_port)
 			return -EINVAL;
-	} else {
+	} else if (!default_port) {
 		p = strchr(str, ':');
 		if (!p)
 			return -EINVAL;
 		l = p - str;
-		if (l >= sizeof(host))
-			return -EINVAL;
+	} else {
+		l = strlen(str);
+		p = NULL;
 	}
+
+	if (l >= sizeof(host))
+		return -EINVAL;
 
 	strncpy(host, str, l);
 	host[l] = '\0';
-	strncpy(port, p + 1, sizeof(port) - 1);
-	port[sizeof(port) - 1] = '\0';
+	if (default_port) {
+		snprintf(port, 6, "%hu", default_port);
+	} else {
+		strncpy(port, p + 1, sizeof(port) - 1);
+		port[sizeof(port) - 1] = '\0';
+	}
 
 	r = getaddrinfo(host, port, &hints, &res);
 	if (r)

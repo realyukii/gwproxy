@@ -19,9 +19,11 @@ struct gwp_sockaddr {
  *
  * @param str source
  * @param gs destination
+ * @param default_port fill it with zero if unspecified
  * @return zero on success and a negative integer on failure.
  */
-int convert_str_to_ssaddr(const char *str, struct gwp_sockaddr *gs);
+int convert_str_to_ssaddr(const char *str,
+				struct gwp_sockaddr *gs, uint16_t default_port);
 
 /*
  * Convert network address to string format

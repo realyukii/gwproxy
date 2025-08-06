@@ -528,7 +528,7 @@ static int gwp_ctx_init_threads(struct gwp_ctx *ctx)
 		return -EINVAL;
 	}
 
-	r = convert_str_to_ssaddr(cfg->bind, &bind_addr);
+	r = convert_str_to_ssaddr(cfg->bind, &bind_addr, 0);
 	if (r) {
 		pr_err(&ctx->lh, "Invalid bind address '%s'\n", cfg->bind);
 		return r;
@@ -747,7 +747,7 @@ static int gwp_ctx_init(struct gwp_ctx *ctx)
 
 	if (!ctx->cfg.as_socks5) {
 		const char *t = ctx->cfg.target;
-		r = convert_str_to_ssaddr(t, &ctx->target_addr);
+		r = convert_str_to_ssaddr(t, &ctx->target_addr, 0);
 		if (r) {
 			pr_err(&ctx->lh, "Invalid target address '%s'", t);
 			goto out_free_log;
