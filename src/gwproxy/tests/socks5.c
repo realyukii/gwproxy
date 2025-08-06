@@ -383,7 +383,7 @@ static ssize_t file_put_contents(const char *path, const char *data, size_t len)
 	if (fwr < len)
 		ret = -EIO;
 	else
-		ret = (size_t)fwr;
+		ret = (int)fwr;
 
 	fclose(f);
 	return ret;
