@@ -9,16 +9,9 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <netinet/in.h>
+#include <gwproxy/net.h>
 
 struct gwp_dns_wrk;
-
-struct gwp_sockaddr {
-	union {
-		struct sockaddr		sa;
-		struct sockaddr_in	i4;
-		struct sockaddr_in6	i6;
-	};
-};
 
 struct gwp_dns_entry {
 	char			*name;
