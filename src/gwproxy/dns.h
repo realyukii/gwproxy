@@ -9,12 +9,18 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <netinet/in.h>
+#include <gwproxy/common.h>
 #include <gwproxy/net.h>
+#include <gwproxy/dnsparser.h>
 #include <gwproxy/syscall.h>
 
-struct gwp_dns_wrk;
-
 struct gwp_dns_entry {
+	uint32_t		idx;
+	int			payloadlen;
+	union {
+		uint16_t	txid;
+		uint8_t		payload[UDP_MSG_LIMIT];
+	};
 	char			*name;
 	char			*service;
 	_Atomic(int)		refcnt;
@@ -32,13 +38,33 @@ enum {
 	GWP_DNS_RESTYP_PREFER_IPV6	= 4,
 };
 
+#define DEFAULT_ENTRIES_CAP 255
+
 struct gwp_dns_cfg {
 	int		cache_expiry;	/* In seconds. <= 0 to disable cache. */
 	uint32_t	nr_workers;
 	uint32_t	restyp;
+	bool		use_raw_dns;
+	const char	*ns_addr_str;
 };
 
-struct gwp_dns_ctx;
+struct gwp_dns_ctx {
+	uint32_t		entry_cap;
+	struct gwp_dns_entry	**entries;
+	struct gwp_sockaddr	ns_addr;
+	socklen_t		ns_addrlen;
+	volatile bool		should_stop;
+	pthread_mutex_t		lock;
+	pthread_cond_t		cond;
+	uint32_t		nr_sleeping;
+	uint32_t		nr_entries;
+	struct gwp_dns_entry	*head;
+	struct gwp_dns_entry	*tail;
+	struct gwp_dns_wrk	*workers;
+	struct gwp_dns_cache	*cache;
+	time_t			last_scan;
+	struct gwp_dns_cfg	cfg;
+};
 
 /**
  * Initialize the DNS context. Stores the context in `*ctx_p`. When
@@ -87,6 +113,25 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
  * @return		True if the entry was freed, false otherwise.
  */
 bool gwp_dns_entry_put(struct gwp_dns_entry *entry);
+
+#ifdef CONFIG_RAW_DNS
+struct gwp_dns_entry *gwp_raw_dns_queue(uint16_t txid, struct gwp_dns_ctx *ctx,
+				    const char *name, const char *service);
+
+void gwp_dns_raw_entry_free(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e);
+
+int gwp_dns_process(uint8_t buff[UDP_MSG_LIMIT], int bufflen, struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e);
+#else
+static inline struct gwp_dns_entry *gwp_raw_dns_queue(__maybe_unused uint16_t txid, __maybe_unused struct gwp_dns_ctx *ctx,
+				    __maybe_unused const char *name, __maybe_unused const char *service)
+{
+	return NULL;
+}
+
+static inline void gwp_dns_raw_entry_free(__maybe_unused struct gwp_dns_ctx *ctx, __maybe_unused struct gwp_dns_entry *e)
+{
+}
+#endif /* #ifdef CONFIG_RAW_DNS */
 
 /**
  * Lookup a DNS entry in the cache. If the entry is found, it fills the

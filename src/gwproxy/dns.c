@@ -23,27 +23,12 @@
 
 #include <pthread.h>
 #include <sys/eventfd.h>
-
-struct gwp_dns_ctx;
+#include <gwproxy/dnsparser.h>
 
 struct gwp_dns_wrk {
 	struct gwp_dns_ctx	*ctx;
 	uint32_t		id;
 	pthread_t		thread;
-};
-
-struct gwp_dns_ctx {
-	volatile bool		should_stop;
-	pthread_mutex_t		lock;
-	pthread_cond_t		cond;
-	uint32_t		nr_sleeping;
-	uint32_t		nr_entries;
-	struct gwp_dns_entry	*head;
-	struct gwp_dns_entry	*tail;
-	struct gwp_dns_wrk	*workers;
-	struct gwp_dns_cache	*cache;
-	time_t			last_scan;
-	struct gwp_dns_cfg	cfg;
 };
 
 static void put_all_entries(struct gwp_dns_entry *head)
@@ -181,6 +166,174 @@ int gwp_dns_resolve(struct gwp_dns_ctx *ctx, const char *name,
 
 	return found ? 0 : -EHOSTUNREACH;
 }
+
+#ifdef CONFIG_RAW_DNS
+
+static void _gwp_dns_entry_free(struct gwp_dns_entry *e)
+{
+	assert(e);
+	free(e->name);
+	free(e);
+}
+
+void gwp_dns_raw_entry_free(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e)
+{
+	struct gwp_dns_entry *new_e;
+
+	assert(e);
+
+	new_e = ctx->entries[--ctx->nr_entries];
+	assert(ctx->nr_entries == new_e->idx);
+	new_e->idx = e->idx;
+	ctx->entries[e->idx] = new_e;
+	ctx->entries[ctx->nr_entries] = NULL;
+
+	_gwp_dns_entry_free(e);
+}
+
+static void free_all_queued_entries(struct gwp_dns_ctx *ctx)
+{
+	uint32_t i;
+	for (i = 0; i < ctx->nr_entries; i++) {
+		struct gwp_dns_entry *e = ctx->entries[i];
+		_gwp_dns_entry_free(e);
+	}
+
+	free(ctx->entries);
+}
+
+static bool realloc_entries(struct gwp_dns_ctx *ctx)
+{
+	struct gwp_dns_entry **tmp;
+	int new_cap;
+
+	new_cap = ctx->entry_cap * 2;
+	tmp = realloc(ctx->entries, new_cap * sizeof(*tmp));
+	if (!tmp)
+		return 1;
+
+	ctx->entries = tmp;
+	ctx->entry_cap = new_cap;
+
+	return 0;
+}
+
+static int attempt_fallback(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e)
+{
+	int af, r;
+
+	/* Fallback to other family if this one yield no results */
+	switch (ctx->cfg.restyp) {
+	case GWP_DNS_RESTYP_PREFER_IPV4:
+		af = AF_INET6;
+		break;
+	case GWP_DNS_RESTYP_PREFER_IPV6:
+		af = AF_INET;
+		break;
+	default:
+		assert(0);
+		return -EINVAL;
+	}
+
+	r = (int)gwdns_build_query(e->txid,
+				e->name, af, e->payload, sizeof(e->payload));
+	if (r > 0) {
+		e->payloadlen = r;
+		r = -EAGAIN;
+	}
+
+	return r;
+}
+
+int gwp_dns_process(uint8_t buff[UDP_MSG_LIMIT], int bufflen, struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e)
+{
+	struct gwdns_addrinfo_node *ai;
+	ssize_t r;
+
+	r = gwdns_parse_query(e->txid, e->service, buff, bufflen, &ai);
+	if (r) {
+		if (r == -ENODATA)
+			r = attempt_fallback(ctx, e);
+		goto exit;
+	}
+
+	e->addr = ai->ai_addr;
+
+	gwdns_free_parsed_query(ai);
+exit:
+	return (int)r;
+}
+
+struct gwp_dns_entry *gwp_raw_dns_queue(uint16_t txid, struct gwp_dns_ctx *ctx,
+				    const char *name, const char *service)
+{
+	struct gwp_dns_entry *e;
+	size_t nl, sl;
+	ssize_t r;
+	int af;
+
+	e = malloc(sizeof(*e));
+	if (!e)
+		return NULL;
+
+	if (ctx->nr_entries == ctx->entry_cap && realloc_entries(ctx))
+		return NULL;
+
+	switch (ctx->cfg.restyp) {
+	case GWP_DNS_RESTYP_PREFER_IPV4:
+	case GWP_DNS_RESTYP_IPV4_ONLY:
+	case GWP_DNS_RESTYP_DEFAULT:
+		af = AF_INET;
+		break;
+	case GWP_DNS_RESTYP_PREFER_IPV6:
+	case GWP_DNS_RESTYP_IPV6_ONLY:
+		af = AF_INET6;
+		break;
+	default:
+		assert(0);
+		goto out_free_e;
+	}
+
+	r = gwdns_build_query(txid,
+				name, af, e->payload, sizeof(e->payload));
+	if (r < 0)
+		goto out_free_e;
+	e->payloadlen = (int)r;
+
+	/*
+	 * Merge name and service into a single allocated string to
+	 * avoid multiple allocations.
+	 *
+	 * The format is: "<name>\0<service>\0" where both name and
+	 * service are null-terminated strings.
+	 */
+	nl = strlen(name);
+	sl = service ? strlen(service) : 0;
+	e->name = malloc(nl + 1 + sl + 1);
+	if (!e->name)
+		goto out_free_e;
+
+	e->service = e->name + nl + 1;
+	memcpy(e->name, name, nl + 1);
+	if (service)
+		memcpy(e->service, service, sl + 1);
+	else
+		e->service[0] = '\0';
+
+	e->res = 0;
+	e->idx = ctx->nr_entries++;
+	ctx->entries[e->idx] = e;
+
+	return e;
+out_free_e:
+	free(e);
+	return NULL;
+}
+#else
+static void free_all_queued_entries(__maybe_unused struct gwp_dns_ctx *ctx)
+{
+}
+#endif /* #ifdef CONFIG_RAW_DNS */
 
 static void gwp_dns_entry_free(struct gwp_dns_entry *e)
 {
@@ -713,39 +866,55 @@ int gwp_dns_ctx_init(struct gwp_dns_ctx **ctx_p, const struct gwp_dns_cfg *cfg)
 		return -ENOMEM;
 
 	ctx->cfg = *cfg;
-	r = pthread_mutex_init(&ctx->lock, NULL);
-	if (r) {
-		r = -r;
-		goto out_free_ctx;
+
+	if (cfg->use_raw_dns) {
+		r = convert_str_to_ssaddr(cfg->ns_addr_str, &ctx->ns_addr, 53);
+		if (r)
+			goto out_free_ctx;
+		ctx->ns_addrlen = ctx->ns_addr.sa.sa_family == AF_INET
+				? sizeof(ctx->ns_addr.i4)
+				: sizeof(ctx->ns_addr.i6);
+		ctx->entry_cap = DEFAULT_ENTRIES_CAP;
+		ctx->entries = malloc(ctx->entry_cap * sizeof(*ctx->entries));
+		if (!ctx->entries) {
+			__sys_close(r);
+			r = -ENOMEM;
+			goto out_free_ctx;
+		}
+	} else {
+		r = pthread_mutex_init(&ctx->lock, NULL);
+		if (r) {
+			r = -r;
+			goto out_free_ctx;
+		}
+
+		r = pthread_cond_init(&ctx->cond, NULL);
+		if (r) {
+			r = -r;
+			goto out_destroy_mutex;
+		}
+
+		ctx->nr_sleeping = 0;
+		ctx->workers = NULL;
+		ctx->head = NULL;
+		ctx->tail = NULL;
+		r = init_workers(ctx);
+		if (r)
+			goto out_destroy_cond;
+		r = init_cache(ctx);
+		if (r)
+			goto out_destroy_cond;
+
+		ctx->should_stop = false;
+		ctx->last_scan = time(NULL);
 	}
 
-	r = pthread_cond_init(&ctx->cond, NULL);
-	if (r) {
-		r = -r;
-		goto out_destroy_mutex;
-	}
-
-	r = init_cache(ctx);
-	if (r)
-		goto out_destroy_cond;
-
-	ctx->nr_sleeping = 0;
 	ctx->nr_entries = 0;
-	ctx->workers = NULL;
-	ctx->head = NULL;
-	ctx->tail = NULL;
-	ctx->should_stop = false;
-	ctx->last_scan = time(NULL);
-	r = init_workers(ctx);
-	if (r)
-		goto out_free_cache;
-
 	*ctx_p = ctx;
 	return 0;
-out_free_cache:
-	free_cache(ctx->cache);
 out_destroy_cond:
-	pthread_cond_destroy(&ctx->cond);
+	if (!cfg->use_raw_dns)
+		pthread_cond_destroy(&ctx->cond);
 out_destroy_mutex:
 	pthread_mutex_destroy(&ctx->lock);
 out_free_ctx:
@@ -762,11 +931,15 @@ static void put_all_queued_entries(struct gwp_dns_ctx *ctx)
 
 void gwp_dns_ctx_free(struct gwp_dns_ctx *ctx)
 {
-	free_workers(ctx);
-	pthread_mutex_destroy(&ctx->lock);
-	pthread_cond_destroy(&ctx->cond);
-	put_all_queued_entries(ctx);
-	free_cache(ctx->cache);
+	if (ctx->cfg.use_raw_dns) {
+		free_all_queued_entries(ctx);
+	} else {
+		free_workers(ctx);
+		pthread_mutex_destroy(&ctx->lock);
+		pthread_cond_destroy(&ctx->cond);
+		put_all_queued_entries(ctx);
+		free_cache(ctx->cache);
+	}
 	free(ctx);
 }
 
