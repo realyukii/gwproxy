@@ -318,6 +318,8 @@ int gwdns_parse_query(uint16_t txid, const char *service,
 	*ai = results;
 	r = 0;
 exit_free:
+	if (r && results)
+		gwdns_free_parsed_query(results);
 	free_serialize_answ(&raw_answ);
 	return r;
 }

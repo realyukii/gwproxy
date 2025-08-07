@@ -9,6 +9,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include <gwproxy/common.h>
 #include <gwproxy/syscall.h>
 #include <gwproxy/socks5.h>
 #include <gwproxy/dns.h>
@@ -24,6 +25,7 @@ struct gwp_cfg {
 	const char	*event_loop;
 	const char	*bind;
 	const char	*target;
+	bool		use_raw_dns;
 	bool		as_socks5;
 	bool		as_http;
 	bool		socks5_prefer_ipv6;
@@ -31,7 +33,6 @@ struct gwp_cfg {
 	const char	*socks5_auth_file;
 	int		socks5_dns_cache_secs;
 	int		nr_workers;
-	int		nr_dns_workers;
 	int		connect_timeout;
 	int		target_buf_size;
 	int		client_buf_size;
@@ -44,6 +45,10 @@ struct gwp_cfg {
 	int		log_level;
 	const char	*log_file;
 	const char	*pid_file;
+#ifdef CONFIG_RAW_DNS
+	const char	*ns_addr_str;
+	int		sess_map_cap;
+#endif
 };
 
 struct gwp_ctx;
@@ -195,8 +200,24 @@ struct iou {
 };
 #endif
 
+struct stack_u16 {
+	uint16_t top;
+	uint16_t *arr;
+};
+
+struct dns_resolver {
+	struct stack_u16	stack;
+	struct gwp_conn_pair	**sess_map;
+	uint16_t		sess_map_cap;
+	int			udp_fd;
+};
+
 struct gwp_wrk {
 	int			tcp_fd;
+#ifdef CONFIG_RAW_DNS
+	/* For mapping DNS queries to the corresponding proxy session */
+	struct dns_resolver	dns_resolver;
+#endif
 	struct gwp_conn_slot	conn_slot;
 
 	union {
@@ -250,6 +271,72 @@ int gwp_create_sock_target(struct gwp_wrk *w, struct gwp_sockaddr *addr,
 int gwp_create_timer(int fd, int sec, int nsec);
 void gwp_setup_cli_sock_options(struct gwp_wrk *w, int fd);
 const char *ip_to_str(const struct gwp_sockaddr *gs);
+
+#ifdef CONFIG_RAW_DNS
+static inline void shrink_stack(struct gwp_wrk *w)
+{
+	struct dns_resolver *resolv;
+	struct gwp_cfg *cfg;
+	uint16_t *p1;
+	void *p2;
+	int i;
+
+	cfg = &w->ctx->cfg;
+	resolv = &w->dns_resolver;
+	p1 = realloc(resolv->stack.arr, cfg->sess_map_cap * sizeof(*resolv->stack.arr));
+	if (!p1)
+		return;
+	resolv->stack.arr = p1;
+
+	p2 = realloc(resolv->sess_map, cfg->sess_map_cap * sizeof(*resolv->sess_map));
+	if (!p2)
+		return;
+	resolv->sess_map = p2;
+
+	memset(p2, 0, cfg->sess_map_cap * sizeof(*resolv->sess_map));
+
+	i = cfg->sess_map_cap;
+	resolv->stack.top = i--;
+	for (; i <= 0; i--)
+		p1[i] = i;
+
+	resolv->sess_map_cap = cfg->sess_map_cap;
+}
+
+static inline int return_txid(struct gwp_wrk *w, struct gwp_dns_entry *gde)
+{
+	struct dns_resolver *resolv;
+	struct gwp_cfg *cfg;
+	uint16_t idx;
+
+	resolv = &w->dns_resolver;
+	cfg = &w->ctx->cfg;
+	/* the program shouldn't return more than its pop */
+	if (resolv->stack.top >= resolv->sess_map_cap) {
+		assert(0);
+		return -EINVAL;
+	}
+
+	idx = resolv->stack.top++;
+	/* shrinks it when there is no active query
+	 * and the allocated size is larger than the default size.
+	 */
+	if (idx == resolv->sess_map_cap &&
+		resolv->sess_map_cap > cfg->sess_map_cap) {
+		shrink_stack(w);
+	} else {
+		resolv->stack.arr[idx] = gde->txid;
+		resolv->sess_map[idx] = NULL;
+	}
+
+	return 0;
+}
+#else
+static inline int return_txid(__maybe_unused struct gwp_wrk *w, __maybe_unused struct gwp_dns_entry *gde)
+{
+	return 0;
+}
+#endif
 
 static inline void gwp_conn_buf_advance(struct gwp_conn *conn, size_t len)
 {

@@ -44,6 +44,11 @@
 
 static const struct option long_opts[] = {
 	{ "help",		no_argument,		NULL,	'h' },
+	{ "raw-dns",		required_argument,	NULL,	'r' },
+#ifdef CONFIG_RAW_DNS
+	{ "dns-server",		required_argument,	NULL,	'j' },
+	{ "session-map-cap",	required_argument,	NULL,	's' },
+#endif
 	{ "event-loop",		required_argument,	NULL,	'e' },
 	{ "bind",		required_argument,	NULL,	'b' },
 	{ "target",		required_argument,	NULL,	't' },
@@ -54,7 +59,6 @@ static const struct option long_opts[] = {
 	{ "socks5-auth-file",	required_argument,	NULL,	'A' },
 	{ "socks5-dns-cache-secs",	required_argument,	NULL,	'L' },
 	{ "nr-workers",		required_argument,	NULL,	'w' },
-	{ "nr-dns-workers",	required_argument,	NULL,	'W' },
 	{ "connect-timeout",	required_argument,	NULL,	'c' },
 	{ "target-buf-size",	required_argument,	NULL,	'T' },
 	{ "client-buf-size",	required_argument,	NULL,	'C' },
@@ -74,6 +78,7 @@ static const struct gwp_cfg default_opts = {
 	.event_loop		= "epoll",
 	.bind			= "[::]:1080",
 	.target			= NULL,
+	.use_raw_dns		= false,
 	.as_socks5		= false,
 	.as_http		= false,
 	.socks5_prefer_ipv6	= false,
@@ -81,7 +86,6 @@ static const struct gwp_cfg default_opts = {
 	.socks5_auth_file	= NULL,
 	.socks5_dns_cache_secs	= 0,
 	.nr_workers		= 4,
-	.nr_dns_workers		= 4,
 	.connect_timeout	= 5,
 	.target_buf_size	= 2048,
 	.client_buf_size	= 2048,
@@ -94,6 +98,10 @@ static const struct gwp_cfg default_opts = {
 	.log_level		= 3,
 	.log_file		= "/dev/stdout",
 	.pid_file		= NULL,
+#ifdef CONFIG_RAW_DNS
+	.ns_addr_str		= "1.1.1.1",
+	.sess_map_cap		= 16
+#endif
 };
 
 __cold
@@ -104,6 +112,10 @@ static void show_help(const char *app)
 	printf("  -h, --help                      Show this help message and exit\n");
 	printf("  -e, --event-loop=name           Specify the event loop to use (default: %s)\n", default_opts.event_loop);
 	printf("                                  Available values: epoll, io_uring\n");
+	printf("  -r, --raw-dns=0|1               Use experimental raw DNS as the backend (default: %d)\n", default_opts.use_raw_dns);
+#ifdef CONFIG_RAW_DNS
+	printf("  -j, --dns-server=addr           DNS server address (default: %s)\n", default_opts.ns_addr_str);
+#endif
 	printf("  -b, --bind=addr:port            Bind to the specified address (default: %s)\n", default_opts.bind);
 	printf("  -t, --target=addr_port          Target address to connect to\n");
 	printf("  -S, --as-socks5=0|1             Run as a SOCKS5 proxy (default: %d)\n", default_opts.as_socks5);
@@ -114,7 +126,6 @@ static void show_help(const char *app)
 	printf("  -L, --socks5-dns-cache-secs=sec SOCKS5 DNS cache duration in seconds (default: %d)\n", default_opts.socks5_dns_cache_secs);
 	printf("                                  Set to 0 or a negative number to disable DNS caching.\n");
 	printf("  -w, --nr-workers=nr             Number of worker threads (default: %d)\n", default_opts.nr_workers);
-	printf("  -W, --nr-dns-workers=nr         Number of DNS worker threads for SOCKS5 (default: %d)\n", default_opts.nr_dns_workers);
 	printf("  -c, --connect-timeout=sec       Connection to target timeout in seconds (default: %d)\n", default_opts.connect_timeout);
 	printf("  -T, --target-buf-size=nr        Target buffer size in bytes (default: %d)\n", default_opts.target_buf_size);
 	printf("  -C, --client-buf-size=nr        Client buffer size in bytes (default: %d)\n", default_opts.client_buf_size);
@@ -159,6 +170,9 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 		case 'h':
 			show_help(argv[0]);
 			exit(0);
+		case 'r':
+			cfg->use_raw_dns = !!atoi(optarg);
+			break;
 		case 'e':
 			cfg->event_loop = optarg;
 			break;
@@ -188,9 +202,6 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 			break;
 		case 'w':
 			cfg->nr_workers = atoi(optarg);
-			break;
-		case 'W':
-			cfg->nr_dns_workers = atoi(optarg);
 			break;
 		case 'c':
 			cfg->connect_timeout = atoi(optarg);
@@ -228,6 +239,14 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 		case 'p':
 			cfg->pid_file = optarg;
 			break;
+#ifdef CONFIG_RAW_DNS
+		case 'j':
+			cfg->ns_addr_str = optarg;
+			break;
+		case 's':
+			cfg->sess_map_cap = atoi(optarg);
+			break;
+#endif
 		default:
 			fprintf(stderr, "Unknown option: %c\n", c);
 			show_help(argv[0]);
@@ -446,6 +465,143 @@ static void gwp_ctx_free_thread_event(struct gwp_wrk *w)
 	}
 }
 
+#ifdef CONFIG_RAW_DNS
+static inline int realloc_stack(struct dns_resolver *resolv)
+{
+	struct gwp_conn_pair **cp;
+	uint16_t *stack;
+	size_t newcap;
+	uint16_t j, idx;
+
+	newcap = resolv->sess_map_cap * 2;
+	if (newcap > 65536)
+		return -ENOSPC;
+
+	cp = realloc(resolv->sess_map, sizeof(*cp) * newcap);
+	if (!cp)
+		return -ENOMEM;
+
+	resolv->sess_map = cp;
+	stack = realloc(resolv->stack.arr, sizeof(*stack) * newcap);
+	if (!stack)
+		return -ENOMEM;
+	resolv->stack.arr = stack;
+
+	j = (uint16_t)newcap - 1;
+	for (idx = 0; j > resolv->sess_map_cap; idx++,j--)
+		stack[idx] = j;
+
+	resolv->sess_map_cap = newcap;
+
+	return 0;
+}
+
+static inline int pop_txid(struct dns_resolver *resolv)
+{
+	int r;
+	if (resolv->stack.top == 0) {
+		r = realloc_stack(resolv);
+		if (r)
+			return -EAGAIN;
+	}
+
+	return resolv->stack.arr[--resolv->stack.top];
+}
+
+static struct gwp_dns_entry *generate_gde(struct gwp_wrk *w, struct gwp_conn_pair *gcp, const char *host, const char *port)
+{
+	struct gwp_dns_entry *gde;
+	struct gwp_dns_ctx *dns = w->ctx->dns;
+	int txid;
+
+	txid = pop_txid(&w->dns_resolver);
+	if (txid < 0)
+		return  NULL;
+
+	gde = gwp_raw_dns_queue((uint16_t)txid, dns, host, port);
+	if (!gde) {
+		return_txid(w, gde);
+		return  NULL;
+	}
+	pr_dbg(&w->ctx->lh, "constructing standard DNS query packet for %s", host);
+	w->dns_resolver.sess_map[txid] = gcp;
+
+	return gde;
+}
+
+static int gwp_ctx_init_dns_resolver(struct gwp_wrk *w)
+{
+	struct dns_resolver *resolv;
+	struct gwp_dns_ctx *dns;
+	struct gwp_cfg *cfg;
+	struct gwp_ctx *ctx;
+	int udp_fd, r;
+	void *ptr;
+
+	ctx = w->ctx;
+	cfg = &ctx->cfg;
+	dns = ctx->dns;
+	udp_fd = __sys_socket(dns->ns_addr.sa.sa_family, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+	if (udp_fd < 0) {
+		pr_err(&w->ctx->lh, "Failed to create udp_fd: %s\n", strerror(-udp_fd));
+		return udp_fd;
+	}
+
+	resolv = &w->dns_resolver;
+	ptr = calloc(cfg->sess_map_cap, sizeof(*resolv->stack.arr));
+	if (!ptr) {
+		r = -ENOMEM;
+		goto exit_close;
+	}
+	resolv->stack.arr = ptr;
+	ptr = calloc(cfg->sess_map_cap, sizeof(ptr));
+	if (!ptr) {
+		r = -ENOMEM;
+		goto exit_free;
+	}
+	resolv->sess_map = ptr;
+
+	resolv->udp_fd = udp_fd;
+	resolv->sess_map_cap = cfg->sess_map_cap;
+
+	r = cfg->sess_map_cap;
+	resolv->stack.top = r--;
+	for (; r <= 0; r--)
+		resolv->stack.arr[r] = r;
+
+	return 0;
+exit_free:
+	free(resolv->stack.arr);
+exit_close:
+	__sys_close(udp_fd);
+	return r;
+}
+
+static void gwp_ctx_free_raw_dns(struct gwp_wrk *w)
+{
+	struct dns_resolver *resolv = &w->dns_resolver;
+	__sys_close(resolv->udp_fd);
+	free(resolv->sess_map);
+	free(resolv->stack.arr);
+}
+#else
+static struct gwp_dns_entry *generate_gde(__maybe_unused struct gwp_wrk *w,
+					  __maybe_unused struct gwp_conn_pair *gcp,
+					  __maybe_unused const char *host,
+					  __maybe_unused const char *port)
+{
+	return NULL;
+}
+static int gwp_ctx_init_dns_resolver(__maybe_unused struct gwp_wrk *w)
+{
+	return 0;
+}
+
+static void gwp_ctx_free_raw_dns(__maybe_unused struct gwp_wrk *w)
+{
+}
+#endif /* #ifdef CONFIG_RAW_DNS */
+
 __cold
 static int gwp_ctx_init_thread(struct gwp_wrk *w,
 			       const struct gwp_sockaddr *bind_addr)
@@ -457,6 +613,14 @@ static int gwp_ctx_init_thread(struct gwp_wrk *w,
 	if (r < 0) {
 		pr_err(&ctx->lh, "gwp_ctx_init_thread_sock: %s\n", strerror(-r));
 		return r;
+	}
+
+	if (ctx->cfg.use_raw_dns) {
+		r = gwp_ctx_init_dns_resolver(w);
+		if (r) {
+			pr_err(&ctx->lh, "gwp_ctx_init_thread_event: %s\n", strerror(-r));
+			gwp_ctx_free_thread_sock(w);
+		}
 	}
 
 	r = gwp_ctx_init_thread_event(w);
@@ -529,6 +693,8 @@ static void gwp_ctx_signal_all_workers(struct gwp_ctx *ctx)
 __cold
 static void gwp_ctx_free_thread(struct gwp_wrk *w)
 {
+	if (w->ctx->cfg.use_raw_dns)
+		gwp_ctx_free_raw_dns(w);
 	gwp_ctx_free_thread_sock_pairs(w);
 	gwp_ctx_free_thread_sock(w);
 	gwp_ctx_free_thread_event(w);
@@ -689,11 +855,22 @@ static int gwp_ctx_init_dns(struct gwp_ctx *ctx)
 {
 	struct gwp_cfg *cfg = &ctx->cfg;
 	const struct gwp_dns_cfg dns_cfg = {
+		.use_raw_dns = cfg->use_raw_dns,
 		.cache_expiry = cfg->socks5_dns_cache_secs,
 		.restyp = cfg->socks5_prefer_ipv6 ? GWP_DNS_RESTYP_PREFER_IPV6 : 0,
-		.nr_workers = cfg->nr_dns_workers
+		.nr_workers = 1,
+#ifdef CONFIG_RAW_DNS
+		.ns_addr_str = cfg->ns_addr_str
+#endif
 	};
 	int r;
+
+	if (cfg->use_raw_dns) {
+#ifndef CONFIG_RAW_DNS
+		pr_err(&ctx->lh, "raw DNS backend is not enabled in this build");
+		return -ENOSYS;
+#endif
+	}
 
 	if (!cfg->as_socks5 && !cfg->as_http) {
 		ctx->dns = NULL;
@@ -733,6 +910,10 @@ static int gwp_ctx_parse_ev(struct gwp_ctx *ctx)
 		ctx->ev_used = GWP_EV_EPOLL;
 		pr_dbg(&ctx->lh, "Using event loop: epoll");
 	} else if (!strcmp(ev, "io_uring") || !strcmp(ev, "iou")) {
+		if (ctx->cfg.use_raw_dns) {
+			pr_err(&ctx->lh, "raw DNS backend is not supported for io_uring yet");
+			return -ENOSYS;
+		}
 		ctx->ev_used = GWP_EV_IO_URING;
 		pr_dbg(&ctx->lh, "Using event loop: io_uring");
 	} else {
@@ -990,8 +1171,15 @@ int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	if (gcp->timer_fd >= 0)
 		__sys_close(gcp->timer_fd);
 
-	if (gcp->gde)
-		gwp_dns_entry_put(gcp->gde);
+	if (gcp->gde) {
+		if (w->ctx->cfg.use_raw_dns) {
+			pr_dbg(&w->ctx->lh, "client disconnected before query for %s resolved", gcp->gde->name);
+			return_txid(w, gcp->gde);
+			gwp_dns_raw_entry_free(w->ctx->dns, gcp->gde);
+		} else {
+			gwp_dns_entry_put(gcp->gde);
+		}
+	}
 
 	switch (gcp->prot_type) {
 	case GWP_PROT_TYPE_SOCKS5:
@@ -1192,7 +1380,12 @@ static int queue_dns_resolution(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	struct gwp_dns_ctx *dns = w->ctx->dns;
 	struct gwp_dns_entry *gde;
 
-	gde = gwp_dns_queue(dns, host, port);
+	if (w->ctx->cfg.use_raw_dns) {
+		gde = generate_gde(w, gcp, host, port);
+	} else {
+		gde = gwp_dns_queue(dns, host, port);
+	}
+
 	if (unlikely(!gde)) {
 		pr_err(&w->ctx->lh, "Failed to allocate DNS entry for %s:%s", host, port);
 		return -ENOMEM;
