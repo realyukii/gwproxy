@@ -10,10 +10,19 @@
 #include <stdbool.h>
 #include <netinet/in.h>
 #include <gwproxy/net.h>
-
-struct gwp_dns_wrk;
+#include <gwproxy/dnsparser.h>
+#include <gwproxy/syscall.h>
 
 struct gwp_dns_entry {
+#ifdef CONFIG_RAW_DNS
+	uint32_t		idx;
+	int			udp_fd;
+	int			payloadlen;
+	union {
+		uint16_t	txid;
+		uint8_t		payload[UDP_MSG_LIMIT];
+	};
+#endif
 	char			*name;
 	char			*service;
 	_Atomic(int)		refcnt;
@@ -31,10 +40,16 @@ enum {
 	GWP_DNS_RESTYP_PREFER_IPV6	= 4,
 };
 
+#define DEFAULT_ENTRIES_CAP 255
+
 struct gwp_dns_cfg {
 	int		cache_expiry;	/* In seconds. <= 0 to disable cache. */
 	uint32_t	nr_workers;
 	uint32_t	restyp;
+	bool		use_raw_dns;
+#ifdef CONFIG_RAW_DNS
+	const char	*ns_addr_str;
+#endif
 };
 
 struct gwp_dns_ctx;
@@ -76,7 +91,6 @@ void gwp_dns_ctx_free(struct gwp_dns_ctx *ctx);
  */
 struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 				    const char *name, const char *service);
-
 /**
  * Release a DNS entry. This function decrements the reference count of the
  * entry. If the reference count reaches zero, the entry is freed.
@@ -86,6 +100,15 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
  * @return		True if the entry was freed, false otherwise.
  */
 bool gwp_dns_entry_put(struct gwp_dns_entry *entry);
+
+#ifdef CONFIG_RAW_DNS
+
+void cp_nsaddr(struct gwp_dns_ctx *ctx, struct gwp_sockaddr *addr, uint8_t *addrlen);
+
+void gwp_dns_raw_entry_free(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e);
+
+int gwp_dns_process(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e);
+#endif
 
 /**
  * Lookup a DNS entry in the cache. If the entry is found, it fills the

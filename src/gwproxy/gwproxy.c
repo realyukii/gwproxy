@@ -44,6 +44,10 @@
 
 static const struct option long_opts[] = {
 	{ "help",		no_argument,		NULL,	'h' },
+	{ "raw-dns",		required_argument,	NULL,	'r' },
+#ifdef CONFIG_RAW_DNS
+	{ "dns-server",		required_argument,	NULL,	'j' },
+#endif
 	{ "event-loop",		required_argument,	NULL,	'e' },
 	{ "bind",		required_argument,	NULL,	'b' },
 	{ "target",		required_argument,	NULL,	't' },
@@ -54,7 +58,6 @@ static const struct option long_opts[] = {
 	{ "socks5-auth-file",	required_argument,	NULL,	'A' },
 	{ "socks5-dns-cache-secs",	required_argument,	NULL,	'L' },
 	{ "nr-workers",		required_argument,	NULL,	'w' },
-	{ "nr-dns-workers",	required_argument,	NULL,	'W' },
 	{ "connect-timeout",	required_argument,	NULL,	'c' },
 	{ "target-buf-size",	required_argument,	NULL,	'T' },
 	{ "client-buf-size",	required_argument,	NULL,	'C' },
@@ -74,6 +77,7 @@ static const struct gwp_cfg default_opts = {
 	.event_loop		= "epoll",
 	.bind			= "[::]:1080",
 	.target			= NULL,
+	.use_raw_dns		= false,
 	.as_socks5		= false,
 	.as_http		= false,
 	.socks5_prefer_ipv6	= false,
@@ -81,7 +85,6 @@ static const struct gwp_cfg default_opts = {
 	.socks5_auth_file	= NULL,
 	.socks5_dns_cache_secs	= 0,
 	.nr_workers		= 4,
-	.nr_dns_workers		= 4,
 	.connect_timeout	= 5,
 	.target_buf_size	= 2048,
 	.client_buf_size	= 2048,
@@ -94,6 +97,9 @@ static const struct gwp_cfg default_opts = {
 	.log_level		= 3,
 	.log_file		= "/dev/stdout",
 	.pid_file		= NULL,
+#ifdef CONFIG_RAW_DNS
+	.ns_addr_str		= "1.1.1.1"
+#endif
 };
 
 __cold
@@ -104,6 +110,10 @@ static void show_help(const char *app)
 	printf("  -h, --help                      Show this help message and exit\n");
 	printf("  -e, --event-loop=name           Specify the event loop to use (default: %s)\n", default_opts.event_loop);
 	printf("                                  Available values: epoll, io_uring\n");
+	printf("  -r, --raw-dns=0|1               Use experimental raw DNS as the backend (default: %d)\n", default_opts.use_raw_dns);
+#ifdef CONFIG_RAW_DNS
+	printf("  -j, --dns-server=addr           DNS server address (default: %s)\n", default_opts.ns_addr_str);
+#endif
 	printf("  -b, --bind=addr:port            Bind to the specified address (default: %s)\n", default_opts.bind);
 	printf("  -t, --target=addr_port          Target address to connect to\n");
 	printf("  -S, --as-socks5=0|1             Run as a SOCKS5 proxy (default: %d)\n", default_opts.as_socks5);
@@ -114,7 +124,6 @@ static void show_help(const char *app)
 	printf("  -L, --socks5-dns-cache-secs=sec SOCKS5 DNS cache duration in seconds (default: %d)\n", default_opts.socks5_dns_cache_secs);
 	printf("                                  Set to 0 or a negative number to disable DNS caching.\n");
 	printf("  -w, --nr-workers=nr             Number of worker threads (default: %d)\n", default_opts.nr_workers);
-	printf("  -W, --nr-dns-workers=nr         Number of DNS worker threads for SOCKS5 (default: %d)\n", default_opts.nr_dns_workers);
 	printf("  -c, --connect-timeout=sec       Connection to target timeout in seconds (default: %d)\n", default_opts.connect_timeout);
 	printf("  -T, --target-buf-size=nr        Target buffer size in bytes (default: %d)\n", default_opts.target_buf_size);
 	printf("  -C, --client-buf-size=nr        Client buffer size in bytes (default: %d)\n", default_opts.client_buf_size);
@@ -159,6 +168,9 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 		case 'h':
 			show_help(argv[0]);
 			exit(0);
+		case 'r':
+			cfg->use_raw_dns = !!atoi(optarg);
+			break;
 		case 'e':
 			cfg->event_loop = optarg;
 			break;
@@ -188,9 +200,6 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 			break;
 		case 'w':
 			cfg->nr_workers = atoi(optarg);
-			break;
-		case 'W':
-			cfg->nr_dns_workers = atoi(optarg);
 			break;
 		case 'c':
 			cfg->connect_timeout = atoi(optarg);
@@ -228,6 +237,11 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 		case 'p':
 			cfg->pid_file = optarg;
 			break;
+#ifdef CONFIG_RAW_DNS
+		case 'j':
+			cfg->ns_addr_str = optarg;
+			break;
+#endif
 		default:
 			fprintf(stderr, "Unknown option: %c\n", c);
 			show_help(argv[0]);
@@ -689,11 +703,22 @@ static int gwp_ctx_init_dns(struct gwp_ctx *ctx)
 {
 	struct gwp_cfg *cfg = &ctx->cfg;
 	const struct gwp_dns_cfg dns_cfg = {
+		.use_raw_dns = cfg->use_raw_dns,
 		.cache_expiry = cfg->socks5_dns_cache_secs,
 		.restyp = cfg->socks5_prefer_ipv6 ? GWP_DNS_RESTYP_PREFER_IPV6 : 0,
-		.nr_workers = cfg->nr_dns_workers
+		.nr_workers = 1,
+#ifdef CONFIG_RAW_DNS
+		.ns_addr_str = cfg->ns_addr_str
+#endif
 	};
 	int r;
+
+	if (cfg->use_raw_dns) {
+#ifndef CONFIG_RAW_DNS
+		pr_err(&ctx->lh, "raw DNS backend is not enabled in this build");
+		return -ENOSYS;
+#endif
+	}
 
 	if (!cfg->as_socks5 && !cfg->as_http) {
 		ctx->dns = NULL;
@@ -733,6 +758,10 @@ static int gwp_ctx_parse_ev(struct gwp_ctx *ctx)
 		ctx->ev_used = GWP_EV_EPOLL;
 		pr_dbg(&ctx->lh, "Using event loop: epoll");
 	} else if (!strcmp(ev, "io_uring") || !strcmp(ev, "iou")) {
+		if (ctx->cfg.use_raw_dns) {
+			pr_err(&ctx->lh, "raw DNS backend is not supported for io_uring yet");
+			return -ENOSYS;
+		}
 		ctx->ev_used = GWP_EV_IO_URING;
 		pr_dbg(&ctx->lh, "Using event loop: io_uring");
 	} else {
@@ -990,8 +1019,15 @@ int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	if (gcp->timer_fd >= 0)
 		__sys_close(gcp->timer_fd);
 
-	if (gcp->gde)
-		gwp_dns_entry_put(gcp->gde);
+	if (gcp->gde) {
+		if (w->ctx->cfg.use_raw_dns) {
+#ifdef CONFIG_RAW_DNS
+		gwp_dns_raw_entry_free(w->ctx->dns, gcp->gde);
+#endif
+		} else {
+			gwp_dns_entry_put(gcp->gde);
+		}
+	}
 
 	switch (gcp->prot_type) {
 	case GWP_PROT_TYPE_SOCKS5:
