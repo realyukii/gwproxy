@@ -34,6 +34,9 @@ for opt do
 	--cxx=*)
 		cxx="$optarg";
 	;;
+	--use-raw-dns)
+		use_raw_dns="yes";
+	;;
 	--use-io-uring)
 		use_io_uring="yes";
 	;;
@@ -87,6 +90,7 @@ Options: [defaults in brackets after descriptions]
   --cxx=CMD                Use CMD as the C++ compiler
   --debug                  Build with debug enabled
   --use-io-uring           Enable io_uring support (default: no)
+  --use-raw-dns            Enable experimental raw DNS backend (default: no)
   --sanitize               Enable sanitizers (default: no)
 EOF
 exit 0;
@@ -331,6 +335,10 @@ if test "${use_io_uring}" = "yes"; then
 	add_config "CONFIG_IO_URING";
 	CFLAGS="${CFLAGS} -I./src/liburing/src/include";
 	CXXFLAGS="${CXXFLAGS} -I./src/liburing/src/include";
+fi;
+
+if test "${use_raw_dns}" = "yes"; then
+	add_config "CONFIG_RAW_DNS";
 fi;
 
 if test "${use_sanitize}" = "yes"; then

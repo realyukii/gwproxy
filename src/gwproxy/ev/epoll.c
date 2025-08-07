@@ -778,24 +778,55 @@ static int handle_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	return 0;
 }
 
+#ifdef CONFIG_RAW_DNS
+static int arm_poll_for_raw_dns_query(struct gwp_wrk *w,
+					struct gwp_conn_pair *gcp)
+{
+	struct gwp_dns_entry *gde = gcp->gde;
+	struct gwp_dns_ctx *dctx;
+	struct gwp_sockaddr addr;
+	uint8_t addrlen;
+	ssize_t r;
+
+	dctx = w->ctx->dns;
+	cp_nsaddr(dctx, &addr, &addrlen);
+	r = __sys_sendto(
+		gde->udp_fd, gde->payload, gde->payloadlen, MSG_NOSIGNAL,
+		&addr.sa, addrlen
+	);
+
+	return (int)r;
+}
+#endif
+
 static int arm_poll_for_dns_query(struct gwp_wrk *w,
 					struct gwp_conn_pair *gcp)
 {
 	struct gwp_dns_entry *gde = gcp->gde;
 	struct epoll_event ev;
-	int r;
+	ssize_t r;
 
 	assert(gde);
-	assert(gde->ev_fd >= 0);
 
 	ev.events = EPOLLIN;
 	ev.data.u64 = 0;
 	ev.data.ptr = gcp;
 	ev.data.u64 |= EV_BIT_DNS_QUERY;
 
-	r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_ADD, gde->ev_fd, &ev);
+	if (w->ctx->cfg.use_raw_dns) {
+#ifdef CONFIG_RAW_DNS
+	arm_poll_for_raw_dns_query(w, gcp);
+
+	r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_ADD, gde->udp_fd, &ev);
 	if (unlikely(r))
-		return r;
+		return (int)r;
+#endif
+	} else {
+		assert(gde->ev_fd >= 0);
+		r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_ADD, gde->ev_fd, &ev);
+		if (unlikely(r))
+			return (int)r;
+	}
 
 	return 0;
 }
@@ -826,13 +857,25 @@ static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	int r, ct = gcp->conn_state;
 
 	assert(gde);
-	assert(gde->ev_fd >= 0);
 	assert(ct == CONN_STATE_SOCKS5_DNS_QUERY ||
 	       ct == CONN_STATE_HTTP_DNS_QUERY);
 
-	r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_DEL, gde->ev_fd, NULL);
-	if (unlikely(r))
-		return r;
+	if (w->ctx->cfg.use_raw_dns) {
+#ifdef CONFIG_RAW_DNS
+		r = gwp_dns_process(w->ctx->dns, gde);
+		if (r == -EAGAIN) {
+			pr_dbg(&w->ctx->lh, "DNS Fallback");
+			arm_poll_for_raw_dns_query(w, gcp);
+			return 0;
+		} else if (r)
+			gde->res = r;
+#endif
+	} else {
+		assert(gde->ev_fd >= 0);
+		r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_DEL, gde->ev_fd, NULL);
+		if (unlikely(r))
+			return r;
+	}
 
 	log_dns_query(w, gcp, gde);
 	if (likely(!gde->res)) {
@@ -845,7 +888,13 @@ static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 			r = -EIO;
 	}
 
-	gwp_dns_entry_put(gde);
+	if (w->ctx->cfg.use_raw_dns) {
+#ifdef CONFIG_RAW_DNS
+	gwp_dns_raw_entry_free(w->ctx->dns, gde);
+#endif
+	} else {
+		gwp_dns_entry_put(gde);
+	}
 	gcp->gde = NULL;
 	return r;
 }

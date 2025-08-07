@@ -24,6 +24,7 @@ struct gwp_cfg {
 	const char	*event_loop;
 	const char	*bind;
 	const char	*target;
+	bool		use_raw_dns;
 	bool		as_socks5;
 	bool		as_http;
 	bool		socks5_prefer_ipv6;
@@ -31,7 +32,6 @@ struct gwp_cfg {
 	const char	*socks5_auth_file;
 	int		socks5_dns_cache_secs;
 	int		nr_workers;
-	int		nr_dns_workers;
 	int		connect_timeout;
 	int		target_buf_size;
 	int		client_buf_size;
@@ -44,6 +44,9 @@ struct gwp_cfg {
 	int		log_level;
 	const char	*log_file;
 	const char	*pid_file;
+#ifdef CONFIG_RAW_DNS
+	const char	*ns_addr_str;
+#endif
 };
 
 struct gwp_ctx;
