@@ -10,17 +10,21 @@
 #include <stdbool.h>
 #include <netinet/in.h>
 #include <gwproxy/net.h>
-
-struct gwp_dns_wrk;
+#include <gwproxy/dnsparser.h>
+#include <gwproxy/syscall.h>
 
 struct gwp_dns_entry {
+	int			idx;
 	char			*name;
 	char			*service;
-	_Atomic(int)		refcnt;
 	int			res;
-	int			ev_fd;
+	int			udp_fd;
 	struct gwp_sockaddr	addr;
-	struct gwp_dns_entry	*next;
+	int			payloadlen;
+	union {
+		uint16_t	txid;
+		uint8_t		payload[UDP_MSG_LIMIT];
+	};
 };
 
 enum {
@@ -31,9 +35,12 @@ enum {
 	GWP_DNS_RESTYP_PREFER_IPV6	= 4,
 };
 
+#define DEFAULT_ENTRIES_CAP 255
+
 struct gwp_dns_cfg {
 	int		cache_expiry;	/* In seconds. <= 0 to disable cache. */
 	uint32_t	nr_workers;
+	const char	*ns_addr_str;
 	uint32_t	restyp;
 };
 
@@ -64,7 +71,7 @@ void gwp_dns_ctx_free(struct gwp_dns_ctx *ctx);
 /**
  * Queue a DNS resolution request. It returns a pointer to a gwp_dns_entry
  * with eventfd set to a valid file descriptor that can be used to wait for
- * the resolution result. The caller's responsible to call gwp_dns_entry_put()
+ * the resolution result. The caller's responsible to call gwp_dns_entry_free()
  * to release the entry when it is no longer needed.
  *
  * The returned eventfd file descriptor is non-blocking.
@@ -77,15 +84,11 @@ void gwp_dns_ctx_free(struct gwp_dns_ctx *ctx);
 struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 				    const char *name, const char *service);
 
-/**
- * Release a DNS entry. This function decrements the reference count of the
- * entry. If the reference count reaches zero, the entry is freed.
- *
- * @param entry		Pointer to the DNS entry to release. If the entry is
- *			NULL, this function does nothing.
- * @return		True if the entry was freed, false otherwise.
- */
-bool gwp_dns_entry_put(struct gwp_dns_entry *entry);
+void cp_nsaddr(struct gwp_dns_ctx *ctx, struct gwp_sockaddr *addr, uint8_t *addrlen);
+
+void gwp_dns_entry_free(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e);
+
+int gwp_dns_process(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e);
 
 /**
  * Lookup a DNS entry in the cache. If the entry is found, it fills the

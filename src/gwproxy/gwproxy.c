@@ -54,7 +54,6 @@ static const struct option long_opts[] = {
 	{ "socks5-auth-file",	required_argument,	NULL,	'A' },
 	{ "socks5-dns-cache-secs",	required_argument,	NULL,	'L' },
 	{ "nr-workers",		required_argument,	NULL,	'w' },
-	{ "nr-dns-workers",	required_argument,	NULL,	'W' },
 	{ "connect-timeout",	required_argument,	NULL,	'c' },
 	{ "target-buf-size",	required_argument,	NULL,	'T' },
 	{ "client-buf-size",	required_argument,	NULL,	'C' },
@@ -81,7 +80,6 @@ static const struct gwp_cfg default_opts = {
 	.socks5_auth_file	= NULL,
 	.socks5_dns_cache_secs	= 0,
 	.nr_workers		= 4,
-	.nr_dns_workers		= 4,
 	.connect_timeout	= 5,
 	.target_buf_size	= 2048,
 	.client_buf_size	= 2048,
@@ -114,7 +112,6 @@ static void show_help(const char *app)
 	printf("  -L, --socks5-dns-cache-secs=sec SOCKS5 DNS cache duration in seconds (default: %d)\n", default_opts.socks5_dns_cache_secs);
 	printf("                                  Set to 0 or a negative number to disable DNS caching.\n");
 	printf("  -w, --nr-workers=nr             Number of worker threads (default: %d)\n", default_opts.nr_workers);
-	printf("  -W, --nr-dns-workers=nr         Number of DNS worker threads for SOCKS5 (default: %d)\n", default_opts.nr_dns_workers);
 	printf("  -c, --connect-timeout=sec       Connection to target timeout in seconds (default: %d)\n", default_opts.connect_timeout);
 	printf("  -T, --target-buf-size=nr        Target buffer size in bytes (default: %d)\n", default_opts.target_buf_size);
 	printf("  -C, --client-buf-size=nr        Client buffer size in bytes (default: %d)\n", default_opts.client_buf_size);
@@ -188,9 +185,6 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 			break;
 		case 'w':
 			cfg->nr_workers = atoi(optarg);
-			break;
-		case 'W':
-			cfg->nr_dns_workers = atoi(optarg);
 			break;
 		case 'c':
 			cfg->connect_timeout = atoi(optarg);
@@ -691,7 +685,8 @@ static int gwp_ctx_init_dns(struct gwp_ctx *ctx)
 	const struct gwp_dns_cfg dns_cfg = {
 		.cache_expiry = cfg->socks5_dns_cache_secs,
 		.restyp = cfg->socks5_prefer_ipv6 ? GWP_DNS_RESTYP_PREFER_IPV6 : 0,
-		.nr_workers = cfg->nr_dns_workers
+		.nr_workers = 1,
+		.ns_addr_str = "1.1.1.1"
 	};
 	int r;
 
@@ -991,7 +986,7 @@ int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		__sys_close(gcp->timer_fd);
 
 	if (gcp->gde)
-		gwp_dns_entry_put(gcp->gde);
+		gwp_dns_entry_free(w->ctx->dns, gcp->gde);
 
 	switch (gcp->prot_type) {
 	case GWP_PROT_TYPE_SOCKS5:

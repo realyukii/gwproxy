@@ -675,13 +675,13 @@ static int prep_domain_resolution(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 
 	assert(gde);
 	s = get_sqe_nofail(w);
-	io_uring_prep_poll_add(s, gde->ev_fd, POLLIN);
+	io_uring_prep_poll_add(s, gde->udp_fd, POLLIN);
 	io_uring_sqe_set_data(s, gcp);
 	s->user_data |= EV_BIT_IOU_DNS_QUERY;
 	get_gcp(gcp);
 	pr_dbg(&ctx->lh,
 		"Prepared DNS query for domain '%s' (fd=%d, idx=%u, ref_cnt=%d)",
-		gde->name, gde->ev_fd, gcp->idx, gcp->ref_cnt);
+		gde->name, gde->udp_fd, gcp->idx, gcp->ref_cnt);
 
 	return 0;
 }
@@ -741,7 +741,7 @@ static int handle_ev_dns_query(struct gwp_wrk *w, void *udata)
 		gde->name, ip_to_str(&gcp->target_addr), gcp->target.fd,
 		gcp->idx);
 
-	gwp_dns_entry_put(gde);
+	gwp_dns_entry_free(ctx->dns, gde);
 	gcp->gde = NULL;
 	return handle_socks5_connect_target(w, gcp);
 }

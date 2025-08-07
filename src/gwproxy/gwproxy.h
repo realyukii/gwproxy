@@ -31,7 +31,6 @@ struct gwp_cfg {
 	const char	*socks5_auth_file;
 	int		socks5_dns_cache_secs;
 	int		nr_workers;
-	int		nr_dns_workers;
 	int		connect_timeout;
 	int		target_buf_size;
 	int		client_buf_size;
