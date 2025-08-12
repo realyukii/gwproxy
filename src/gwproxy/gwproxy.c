@@ -959,6 +959,7 @@ __hot
 int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct gwp_conn_slot *gcs = &w->conn_slot;
+	struct gwp_cfg *cfg = &w->ctx->cfg;
 	struct gwp_conn_pair *tmp;
 	uint32_t i = gcp->idx;
 
@@ -986,8 +987,13 @@ int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	if (gcp->gde)
 		gwp_dns_entry_put(gcp->gde);
 
-	if (gcp->s5_conn)
-		gwp_socks5_conn_free(gcp->s5_conn);
+	if (cfg->as_socks5) {
+		if (gcp->s5_conn)
+			gwp_socks5_conn_free(gcp->s5_conn);
+	} else if (cfg->as_http) {
+		if (gcp->http_conn)
+			gwp_http_conn_free(gcp->http_conn);
+	}
 
 	free(gcp);
 	shrink_conn_slot(w);
@@ -1264,6 +1270,29 @@ int gwp_socks5_handle_data(struct gwp_conn_pair *gcp)
 	gwp_conn_buf_advance(&gcp->client, in_len);
 	gcp->target.len += out_len;
 	return (r == -EAGAIN) ? 0 : r;
+}
+
+struct gwp_http_conn *gwp_http_conn_alloc(void)
+{
+	struct gwp_http_conn *ghc = malloc(sizeof(*ghc));
+	int r;
+
+	if (!ghc)
+		return NULL;
+
+	r = gwnet_http_hdr_pctx_init(&ghc->ctx_hdr);
+	if (r < 0) {
+		free(ghc);
+		return NULL;
+	}
+
+	return ghc;
+}
+
+void gwp_http_conn_free(struct gwp_http_conn *conn)
+{
+	gwnet_http_hdr_pctx_free(&conn->ctx_hdr);
+	free(conn);
 }
 
 noinline

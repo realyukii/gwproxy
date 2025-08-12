@@ -58,6 +58,8 @@ enum {
 	EV_BIT_DNS_QUERY		= (7ull << 48ull),
 	EV_BIT_SOCKS5_AUTH_FILE		= (8ull << 48ull),
 
+	EV_BIT_HTTP_CONN		= (18ull << 48ull),
+
 #ifdef CONFIG_IO_URING
 	/*
 	 * Only used by io_uring.
@@ -95,6 +97,8 @@ enum {
 	CONN_STATE_SOCKS5_DNS_QUERY	= 260,
 
 	CONN_STATE_FORWARDING		= 301,
+
+	CONN_STATE_HTTP_HDR		= 400,
 };
 
 struct gwp_conn {
@@ -237,5 +241,8 @@ int gwp_socks5_prep_connect_reply(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 				  int err);
 int gwp_socks5_handle_data(struct gwp_conn_pair *gcp);
 int gwp_socks5_prepare_target_addr(struct gwp_wrk *w, struct gwp_conn_pair *gcp);
+
+struct gwp_http_conn *gwp_http_conn_alloc(void);
+void gwp_http_conn_free(struct gwp_http_conn *conn);
 
 #endif /* #ifndef GWPROXY_H */
