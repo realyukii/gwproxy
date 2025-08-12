@@ -613,6 +613,11 @@ static int handle_ev_target_conn_result(struct gwp_wrk *w,
 		r = prep_and_send_socks5_rep_connect(w, gcp, 0);
 		if (r)
 			return r;
+	} else if (gcp->conn_state == CONN_STATE_HTTP_CONNECT) {
+		if (gcp->target.cap < 19)
+			return -ENOBUFS;
+		memcpy(gcp->target.buf, "HTTP/1.1 200 OK\r\n\r\n", 19);
+		gcp->target.len = 19;
 	}
 
 	gcp->is_target_alive = true;
@@ -974,6 +979,111 @@ static int handle_ev_socks5_auth_file(struct gwp_wrk *w)
 	return 0;
 }
 
+static int handle_ev_http_hdr(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
+			       struct epoll_event *ev)
+{
+	struct gwp_http_conn *ghc = gcp->http_conn;
+	struct gwnet_http_req_hdr *req_hdr;
+	struct gwnet_http_hdr_pctx *pctx;
+	struct gwp_sockaddr addr;
+	struct epoll_event evl;
+	ssize_t ret;
+	char *port;
+	int r;
+
+	if (unlikely((!(ev->events & EPOLLIN))))
+		return -EIO;
+
+	ret = __do_recv(&gcp->client);
+	if (ret <= 0)
+		return (int)ret;
+
+	req_hdr = &ghc->req_hdr;
+	pctx = &ghc->ctx_hdr;
+	pctx->buf = gcp->client.buf;
+	pctx->len = gcp->client.len;
+	pctx->off = 0;
+	r = gwnet_http_req_hdr_parse(pctx, req_hdr);
+	gwp_conn_buf_advance(&gcp->client, pctx->off);
+	if (r == -EAGAIN)
+		return 0;
+	if (r)
+		return r;
+
+	/*
+	 * TODO(ammarfaizi2): Support non-connect method proxy.
+	 */
+	if (req_hdr->method != GWNET_HTTP_METHOD_CONNECT)
+		return -EINVAL;
+
+	port = strlen(req_hdr->uri) + req_hdr->uri;
+	while (port != req_hdr->uri) {
+		if (*port == ':') {
+			*port = '\0';
+			port++;
+			break;
+		}
+		port--;
+	}
+
+	/*
+	 * TODO(ammarfaizi2): Make it async.
+	 */
+	r = gwp_dns_resolve(w->ctx->dns, req_hdr->uri, port, &addr, 0);
+	if (r) {
+		pr_err(&w->ctx->lh, "Failed to resolve DNS '%s': %s",
+			req_hdr->uri, strerror(-r));
+		return r;
+	}
+
+	pr_dbg(&w->ctx->lh, "Created socket target: %s:%s %s (fd=%d)",
+		req_hdr->uri, port, ip_to_str(&addr), gcp->target.fd);
+
+	r = gwp_create_sock_target(w, &addr, &gcp->is_target_alive, true);
+	if (r < 0) {
+		pr_err(&w->ctx->lh, "Failed to create socket target: %s",
+			strerror(-r));
+		return r;
+	}
+
+	gcp->target.fd = r;
+	gcp->target.ep_mask = EPOLLOUT | EPOLLIN | EPOLLRDHUP;
+	evl.events = gcp->target.ep_mask;
+	evl.data.u64 = 0;
+	evl.data.ptr = gcp;
+	evl.data.u64 |= EV_BIT_TARGET;
+	r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_ADD, gcp->target.fd, &evl);
+	if (unlikely(r))
+		return r;
+
+	gcp->conn_state = CONN_STATE_HTTP_CONNECT;
+
+	if (gcp->timer_fd >= 0) {
+		__sys_close(gcp->timer_fd);
+		gcp->timer_fd = -1;
+	}
+
+	/*
+	 * TODO(ammarfaizi2): Handle connect timeout.
+	 */
+
+	return r;
+}
+
+static int handle_ev_http_conn(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
+			       struct epoll_event *ev)
+{
+	int r = 0;
+
+	switch (gcp->conn_state) {
+	case CONN_STATE_HTTP_HDR:
+		r = handle_ev_http_hdr(w, gcp, ev);
+		break;
+	}
+
+	return r;
+}
+
 static bool is_ev_bit_conn_pair(uint64_t ev_bit)
 {
 	static const uint64_t conn_pair_ev_bit =
@@ -1011,6 +1121,9 @@ static int handle_event(struct gwp_wrk *w, struct epoll_event *ev)
 		break;
 	case EV_BIT_CLIENT_SOCKS5:
 		r = handle_ev_client_socks5(w, udata, ev);
+		break;
+	case EV_BIT_HTTP_CONN:
+		r = handle_ev_http_conn(w, udata, ev);
 		break;
 	case EV_BIT_DNS_QUERY:
 		r = handle_ev_dns_query(w, udata);

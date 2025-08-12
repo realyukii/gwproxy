@@ -689,7 +689,7 @@ static int gwp_ctx_init_dns(struct gwp_ctx *ctx)
 	};
 	int r;
 
-	if (!cfg->as_socks5) {
+	if (!cfg->as_socks5 && !cfg->as_http) {
 		ctx->dns = NULL;
 		return 0;
 	}

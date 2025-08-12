@@ -99,6 +99,7 @@ enum {
 	CONN_STATE_FORWARDING		= 301,
 
 	CONN_STATE_HTTP_HDR		= 400,
+	CONN_STATE_HTTP_CONNECT		= 401
 };
 
 struct gwp_conn {
