@@ -255,11 +255,17 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 		goto einval;
 	}
 
-	if (cfg->as_http && cfg->as_socks5) {
-		fprintf(stderr, ERR_WRAP "Error: --as-http and --as-socks5 cannot be used together.\n" ERR_WRAP);
-		goto einval;
-	}
+	if (cfg->as_socks5 || cfg->as_http) {
+		if (cfg->client_buf_size < 256) {
+			fprintf(stderr, ERR_WRAP "Error: --client-buf-size must be at least 256 for SOCKS5 or HTTP.\n" ERR_WRAP);
+			goto einval;
+		}
 
+		if (cfg->target_buf_size < 256) {
+			fprintf(stderr, ERR_WRAP "Error: --target-buf-size must be at least 256 for SOCKS5 or HTTP.\n" ERR_WRAP);
+			goto einval;
+		}
+	}
 
 	return 0;
 
@@ -912,6 +918,7 @@ struct gwp_conn_pair *gwp_alloc_conn_pair(struct gwp_wrk *w)
 	gcp->conn_state = CONN_STATE_INIT;
 	gcs->pairs[gcs->nr++] = gcp;
 	gcp->flags = 0;
+	gcp->prot_type = GWP_PROT_TYPE_NONE;
 	return gcp;
 
 out_free_target_conn:
@@ -959,7 +966,6 @@ __hot
 int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct gwp_conn_slot *gcs = &w->conn_slot;
-	struct gwp_cfg *cfg = &w->ctx->cfg;
 	struct gwp_conn_pair *tmp;
 	uint32_t i = gcp->idx;
 
@@ -987,12 +993,13 @@ int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	if (gcp->gde)
 		gwp_dns_entry_put(gcp->gde);
 
-	if (cfg->as_socks5) {
-		if (gcp->s5_conn)
-			gwp_socks5_conn_free(gcp->s5_conn);
-	} else if (cfg->as_http) {
-		if (gcp->http_conn)
-			gwp_http_conn_free(gcp->http_conn);
+	switch (gcp->prot_type) {
+	case GWP_PROT_TYPE_SOCKS5:
+		gwp_socks5_conn_free(gcp->s5_conn);
+		break;
+	case GWP_PROT_TYPE_HTTP:
+		gwp_http_conn_free(gcp->http_conn);
+		break;
 	}
 
 	free(gcp);
@@ -1322,6 +1329,7 @@ static int handle_socks5_prot(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		 * parser already sees the SOCKS5 header.
 		 */
 		gcp->conn_state = CONN_STATE_SOCKS5_DATA;
+		gcp->prot_type = GWP_PROT_TYPE_SOCKS5;
 	}
 
 	return 0;
@@ -1380,6 +1388,7 @@ static int handle_http_hdr(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		return r;
 	}
 
+	gcp->prot_type = GWP_PROT_TYPE_HTTP;
 	return 0;
 }
 

@@ -144,6 +144,12 @@ enum {
 	GWP_CONN_FLAG_IS_CANCEL		= (1ull << 2ull),
 };
 
+enum {
+	GWP_PROT_TYPE_NONE	= 0,
+	GWP_PROT_TYPE_SOCKS5	= 1,
+	GWP_PROT_TYPE_HTTP	= 2,
+};
+
 struct gwp_http_conn {
 	struct gwnet_http_hdr_pctx	ctx_hdr;
 	struct gwnet_http_req_hdr	req_hdr;
@@ -153,6 +159,7 @@ struct gwp_conn_pair {
 	struct gwp_conn		target;
 	struct gwp_conn		client;
 	bool			is_target_alive;
+	uint8_t			prot_type;
 
 #ifdef CONFIG_IO_URING
 	int				ref_cnt;
