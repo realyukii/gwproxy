@@ -325,24 +325,23 @@ static int __handle_ev_accept(struct gwp_wrk *w)
 	static const int flags = SOCK_NONBLOCK | SOCK_CLOEXEC;
 	struct gwp_ctx *ctx = w->ctx;
 	struct gwp_conn_pair *gcp;
-	struct sockaddr *addr;
+	struct gwp_sockaddr addr;
 	socklen_t addr_len;
 	int fd, r;
+
+	addr_len = sizeof(addr);
+	fd = __sys_accept4(w->tcp_fd, &addr.sa, &addr_len, flags);
+	if (fd < 0)
+		return handle_accept_error(w, fd);
 
 	gcp = gwp_alloc_conn_pair(w);
 	if (unlikely(!gcp)) {
 		pr_err(&ctx->lh, "Failed to allocate connection pair on accept");
+		__sys_close(fd);
 		return handle_accept_error(w, -ENOMEM);
 	}
 
-	addr = &gcp->client_addr.sa;
-	addr_len = sizeof(gcp->client_addr);
-	fd = __sys_accept4(w->tcp_fd, addr, &addr_len, flags);
-	if (fd < 0) {
-		r = handle_accept_error(w, fd);
-		goto out_err;
-	}
-
+	gcp->client_addr = addr;
 	gwp_setup_cli_sock_options(w, fd);
 	gcp->client.fd = fd;
 	pr_dbg(&ctx->lh, "New connection from %s (fd=%d)",
