@@ -18,6 +18,7 @@
 #include <assert.h>
 #include <stdatomic.h>
 #include <gwproxy/dns_cache.h>
+#include <arpa/inet.h>
 
 #ifndef container_of
 #define container_of(ptr, type, member) \
