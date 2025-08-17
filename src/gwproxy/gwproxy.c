@@ -1179,11 +1179,8 @@ int gwp_socks5_prep_connect_reply(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 	return 0;
 }
 
-__hot
-static int handle_socks5_connect_domain_async(struct gwp_wrk *w,
-					      struct gwp_conn_pair *gcp,
-					      const char *host,
-					      const char *port)
+static int queue_dns_resolution(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
+				const char *host, const char *port)
 {
 	struct gwp_dns_ctx *dns = w->ctx->dns;
 	struct gwp_dns_entry *gde;
@@ -1194,15 +1191,30 @@ static int handle_socks5_connect_domain_async(struct gwp_wrk *w,
 		return -ENOMEM;
 	}
 
-	gcp->conn_state = CONN_STATE_SOCKS5_DNS_QUERY;
 	gcp->gde = gde;
 	return -EINPROGRESS;
+}
+
+static int prepare_target_addr_domain(struct gwp_wrk *w,
+				      struct gwp_conn_pair *gcp,
+				      const char *host, const char *port)
+{
+	struct gwp_ctx *ctx = w->ctx;
+	int r;
+
+	r = gwp_dns_cache_lookup(ctx->dns, host, port, &gcp->target_addr);
+	if (!r) {
+		pr_dbg(&ctx->lh, "Found %s:%s in DNS cache %s", host, port,
+			ip_to_str(&gcp->target_addr));
+		return 0;
+	}
+
+	return queue_dns_resolution(w, gcp, host, port);
 }
 
 static int socks5_prepare_target_addr_domain(struct gwp_wrk *w,
 					     struct gwp_conn_pair *gcp)
 {
-	struct gwp_ctx *ctx = w->ctx;
 	struct gwp_socks5_addr *dst;
 	const char *host;
 	char portstr[6];
@@ -1213,14 +1225,11 @@ static int socks5_prepare_target_addr_domain(struct gwp_wrk *w,
 	port = ntohs(dst->port);
 	host = dst->domain.str;
 	snprintf(portstr, sizeof(portstr), "%hu", port);
-	r = gwp_dns_cache_lookup(ctx->dns, host, portstr, &gcp->target_addr);
-	if (!r) {
-		pr_dbg(&ctx->lh, "Found %s:%s in DNS cache %s", host, portstr,
-			ip_to_str(&gcp->target_addr));
-		return 0;
-	}
+	r = prepare_target_addr_domain(w, gcp, host, portstr);
+	if (r == -EINPROGRESS)
+		gcp->conn_state = CONN_STATE_SOCKS5_DNS_QUERY;
 
-	return handle_socks5_connect_domain_async(w, gcp, host, portstr);
+	return r;
 }
 
 int gwp_socks5_prepare_target_addr(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
@@ -1230,7 +1239,7 @@ int gwp_socks5_prepare_target_addr(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	struct gwp_socks5_addr *dst;
 
 	assert(sc);
-	assert(sc->state == GWP_SOCKS5_ST_CMD_CONNECT);
+	assert(sc->state == CONN_STATE_SOCKS5_CONNECT);
 
 	dst = &sc->dst_addr;
 	memset(ta, 0, sizeof(*ta));
@@ -1252,7 +1261,6 @@ int gwp_socks5_prepare_target_addr(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	return -ENOSYS;
 }
 
-__hot
 int gwp_socks5_handle_data(struct gwp_conn_pair *gcp)
 {
 	struct gwp_socks5_conn *sc = gcp->s5_conn;
@@ -1287,6 +1295,205 @@ struct gwp_http_conn *gwp_http_conn_alloc(void)
 	}
 
 	return ghc;
+}
+
+static int handle_socks5_prot(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	struct gwp_ctx *ctx = w->ctx;
+	int r;
+
+	gcp->s5_conn = gwp_socks5_conn_alloc(ctx->socks5);
+	if (!gcp->s5_conn) {
+		pr_err(&ctx->lh, "Failed to allocate SOCKS5 connection");
+		return -ENOMEM;
+	}
+
+	r = gwp_socks5_handle_data(gcp);
+	if (r < 0) {
+		gwp_socks5_conn_free(gcp->s5_conn);
+		gcp->s5_conn = NULL;
+		return r;
+	}
+
+	if (gcp->s5_conn->state != GWP_SOCKS5_ST_INIT) {
+		/*
+		 * This must be a SOCKS5 data connection, there is no
+		 * possibility to fallback to HTTP because the SOCKS5
+		 * parser already sees the SOCKS5 header.
+		 */
+		gcp->conn_state = CONN_STATE_SOCKS5_DATA;
+	}
+
+	return 0;
+}
+
+int gwp_handle_conn_state_socks5(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	int r, ct;
+
+	ct = gcp->conn_state;
+	if (ct == CONN_STATE_PROT) {
+		return handle_socks5_prot(w, gcp);
+	} else if (ct == CONN_STATE_SOCKS5_DATA) {
+		r = gwp_socks5_handle_data(gcp);
+		if (r)
+			return r;
+	} else {
+		assert(0 && "Invalid SOCKS5 connection state");
+		return -EINVAL;
+	}
+
+	if (gcp->s5_conn->state == GWP_SOCKS5_ST_CMD_CONNECT) {
+		r = gwp_socks5_prepare_target_addr(w, gcp);
+		if (r == -EINPROGRESS) {
+			gcp->conn_state = CONN_STATE_SOCKS5_DNS_QUERY;
+			return r;
+		}
+
+		if (!r)
+			gcp->conn_state = CONN_STATE_SOCKS5_CONNECT;
+	}
+
+	return r;
+}
+
+static int handle_http_hdr(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	struct gwnet_http_hdr_pctx *ctx_hdr;
+	struct gwnet_http_req_hdr *req_hdr;
+	struct gwp_ctx *ctx = w->ctx;
+	struct gwp_http_conn *conn;
+	int r;
+
+	conn = gcp->http_conn;
+	ctx_hdr = &conn->ctx_hdr;
+	req_hdr = &conn->req_hdr;
+	ctx_hdr->buf = gcp->client.buf;
+	ctx_hdr->len = gcp->client.len;
+	ctx_hdr->off = 0;
+	r = gwnet_http_req_hdr_parse(ctx_hdr, req_hdr);
+	gwp_conn_buf_advance(&gcp->client, ctx_hdr->off);
+	if (r < 0) {
+		if (r == -EAGAIN)
+			return 0;
+		pr_dbg(&ctx->lh, "Invalid HTTP header: %s", strerror(-r));
+		return r;
+	}
+
+	return 0;
+}
+
+static int handle_http_prot(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	struct gwp_ctx *ctx = w->ctx;
+	int r;
+
+	gcp->http_conn = gwp_http_conn_alloc();
+	if (!gcp->http_conn) {
+		pr_err(&ctx->lh, "Failed to allocate HTTP connection");
+		return -ENOMEM;
+	}
+
+	gcp->conn_state = CONN_STATE_HTTP_HDR;
+	r = handle_http_hdr(w, gcp);
+	if (r)
+		return r;
+
+	return 0;
+}
+
+int gwp_handle_conn_state_http(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	struct gwnet_http_req_hdr *req_hdr;
+	bool port_found = false;
+	char *host, *port;
+	int r, ct;
+
+	ct = gcp->conn_state;
+	if (ct == CONN_STATE_PROT) {
+		r = handle_http_prot(w, gcp);
+	} else if (ct == CONN_STATE_HTTP_HDR) {
+		r = handle_http_hdr(w, gcp);
+	} else {
+		assert(0 && "Invalid HTTP connection state");
+		return -EINVAL;
+	}
+
+	if (r == -EAGAIN)
+		return r;
+
+	req_hdr = &gcp->http_conn->req_hdr;
+
+	/*
+	 * TODO(ammarfaizi2): Support non-HTTP CONNECT methods.
+	 */
+	if (req_hdr->method != GWNET_HTTP_METHOD_CONNECT)
+		return -EINVAL;
+
+	host = req_hdr->uri;
+	port = strlen(host) + host;
+	while (port > host) {
+		if (*port == ':') {
+			port_found = true;
+			*port = '\0';
+			port++;
+			break;
+		}
+		port--;
+	}
+
+	if (!port_found)
+		return -EINVAL;
+
+	r = prepare_target_addr_domain(w, gcp, host, port);
+	if (r == -EINPROGRESS)
+		gcp->conn_state = CONN_STATE_HTTP_DNS_QUERY;
+	else if (!r)
+		gcp->conn_state = CONN_STATE_HTTP_CONNECT;
+
+	return r;
+}
+
+int gwp_handle_conn_state_prot(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
+{
+	struct gwp_cfg *cfg = &w->ctx->cfg;
+	struct gwp_ctx *ctx = w->ctx;
+	bool socks5_einval = false;
+	int r = 0;
+
+	assert(gcp->target.fd < 0);
+	assert(cfg->as_http || cfg->as_socks5);
+	assert(gcp->conn_state == CONN_STATE_PROT);
+
+	/*
+	 * At this point, the used protocol may not be known yet.
+	 *
+	 * If both as_socks5 and as_http and are true. Then, try
+	 * parsing as SOCKS5 first. If it fails with -EINVAL, try
+	 * parsing as HTTP.
+	 *
+	 * This allows a single server port be used as both HTTP
+	 * and SOCKS5 simultaneously.
+	 */
+	if (cfg->as_socks5) {
+		r = gwp_handle_conn_state_socks5(w, gcp);
+		if (r != -EINVAL)
+			return r;
+		socks5_einval = true;
+	}
+
+	if (cfg->as_http) {
+		if (socks5_einval)
+			pr_dbg(&ctx->lh,
+				"Not a socks5 protocol, fallback to HTTP (fd=%d; ca=%s)",
+				gcp->client.fd, ip_to_str(&gcp->client_addr));
+
+		r = gwp_handle_conn_state_http(w, gcp);
+		if (r != -EINVAL)
+			return r;
+	}
+
+	return r;
 }
 
 void gwp_http_conn_free(struct gwp_http_conn *conn)

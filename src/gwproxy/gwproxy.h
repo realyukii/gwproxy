@@ -60,6 +60,19 @@ enum {
 
 	EV_BIT_HTTP_CONN		= (18ull << 48ull),
 
+	/*
+	 * This ev_bit is used for user_data masking during protocol
+	 * initalization.
+	 *
+	 * Supported protocols:
+	 *   - SOCKS5
+	 *   - HTTP
+	 *
+	 * It means it waits for the data specific protocol before
+	 * solely forwarding the received data to the destination host.
+	 */
+	EV_BIT_CLIENT_PROT		= (1000ull << 48ull),
+
 #ifdef CONFIG_IO_URING
 	/*
 	 * Only used by io_uring.
@@ -89,17 +102,27 @@ enum {
 #define CLEAR_EV_BIT(X)	((X) & ~EV_BIT_ALL)
 
 enum {
-	CONN_STATE_INIT			= 101,
+	CONN_STATE_INIT			= 0,
+	CONN_STATE_FORWARDING		= 1,
 
-	CONN_STATE_SOCKS5_DATA		= 100,
-	CONN_STATE_SOCKS5_CMD_CONNECT	= 221,
-	CONN_STATE_SOCKS5_ERR		= 250,
-	CONN_STATE_SOCKS5_DNS_QUERY	= 260,
+	CONN_STATE_SOCKS5_MIN		= 100,
+	CONN_STATE_SOCKS5_DATA		= 101,
+	CONN_STATE_SOCKS5_CONNECT	= 102,
+	CONN_STATE_SOCKS5_DNS_QUERY	= 104,
+	CONN_STATE_SOCKS5_MAX		= 199,
 
-	CONN_STATE_FORWARDING		= 301,
+	CONN_STATE_HTTP_MIN		= 400,
+	CONN_STATE_HTTP_HDR		= 401,
+	CONN_STATE_HTTP_CONNECT		= 402,
+	CONN_STATE_HTTP_DNS_QUERY	= 403,
+	CONN_STATE_HTTP_MAX		= 499,
 
-	CONN_STATE_HTTP_HDR		= 400,
-	CONN_STATE_HTTP_CONNECT		= 401
+	/*
+	 * Still waiting for protocol specific. Can be one of these:
+	 *    - SOCKS5
+	 *    - HTTP
+	 */
+	CONN_STATE_PROT			= 500,
 };
 
 struct gwp_conn {
@@ -240,10 +263,13 @@ void log_conn_pair_created(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 
 int gwp_socks5_prep_connect_reply(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 				  int err);
-int gwp_socks5_handle_data(struct gwp_conn_pair *gcp);
 int gwp_socks5_prepare_target_addr(struct gwp_wrk *w, struct gwp_conn_pair *gcp);
 
 struct gwp_http_conn *gwp_http_conn_alloc(void);
 void gwp_http_conn_free(struct gwp_http_conn *conn);
+int gwp_socks5_handle_data(struct gwp_conn_pair *gcp);
+int gwp_handle_conn_state_prot(struct gwp_wrk *w, struct gwp_conn_pair *gcp);
+int gwp_handle_conn_state_socks5(struct gwp_wrk *w, struct gwp_conn_pair *gcp);
+int gwp_handle_conn_state_http(struct gwp_wrk *w, struct gwp_conn_pair *gcp);
 
 #endif /* #ifndef GWPROXY_H */
