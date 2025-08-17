@@ -311,6 +311,7 @@ add_c_and_cxx_flag "-Wmissing-variable-declarations";
 add_c_and_cxx_flag "-Wstrict-aliasing=3";
 add_c_and_cxx_flag "-Wshorten-64-to-32";
 add_c_and_cxx_flag "-Wunsafe-loop-optimizations";
+add_c_and_cxx_flag "-Wno-format-truncation";
 
 printf "\n%s:\n" "-f flags";
 add_c_and_cxx_flag "-fno-stack-protector";
