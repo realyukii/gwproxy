@@ -50,7 +50,7 @@ static const struct option long_opts[] = {
 	{ "as-socks5",		required_argument,	NULL,	'S' },
 	{ "as-http",		required_argument,	NULL,	'H' },
 	{ "socks5-prefer-ipv6",	required_argument,	NULL,	'Q' },
-	{ "socks5-timeout",	required_argument,	NULL,	'o' },
+	{ "protocol-timeout",	required_argument,	NULL,	'o' },
 	{ "socks5-auth-file",	required_argument,	NULL,	'A' },
 	{ "socks5-dns-cache-secs",	required_argument,	NULL,	'L' },
 	{ "nr-workers",		required_argument,	NULL,	'w' },
@@ -77,7 +77,7 @@ static const struct gwp_cfg default_opts = {
 	.as_socks5		= false,
 	.as_http		= false,
 	.socks5_prefer_ipv6	= false,
-	.socks5_timeout		= 10,
+	.protocol_timeout	= 10,
 	.socks5_auth_file	= NULL,
 	.socks5_dns_cache_secs	= 0,
 	.nr_workers		= 4,
@@ -109,7 +109,7 @@ static void show_help(const char *app)
 	printf("  -S, --as-socks5=0|1             Run as a SOCKS5 proxy (default: %d)\n", default_opts.as_socks5);
 	printf("  -H, --as-http=0|1               Run as an HTTP proxy (default: %d)\n", default_opts.as_http);
 	printf("  -Q, --socks5-prefer-ipv6=0|1    Prefer IPv6 for SOCKS5 DNS queries (default: %d)\n", default_opts.socks5_prefer_ipv6);
-	printf("  -o, --socks5-timeout=sec        SOCKS5 auth timeout in seconds (default: %d)\n", default_opts.socks5_timeout);
+	printf("  -o, --protocol-timeout=sec      Timeout for protocol handshake process (default: %d)\n", default_opts.protocol_timeout);
 	printf("  -A, --socks5-auth-file=file     File containing username:password for SOCKS5 auth (default: no auth)\n");
 	printf("  -L, --socks5-dns-cache-secs=sec SOCKS5 DNS cache duration in seconds (default: %d)\n", default_opts.socks5_dns_cache_secs);
 	printf("                                  Set to 0 or a negative number to disable DNS caching.\n");
@@ -178,7 +178,7 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 			cfg->socks5_prefer_ipv6 = !!atoi(optarg);
 			break;
 		case 'o':
-			cfg->socks5_timeout = atoi(optarg);
+			cfg->protocol_timeout = atoi(optarg);
 			break;
 		case 'A':
 			cfg->socks5_auth_file = optarg;

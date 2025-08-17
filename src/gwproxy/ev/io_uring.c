@@ -393,8 +393,8 @@ static int arm_gcp_socks5(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	 * does not have a target socket. We will create the target
 	 * socket later, when the client sends a CONNECT command.
 	 */
-	if (ctx->cfg.socks5_timeout > 0)
-		prep_timer_target(w, gcp, ctx->cfg.socks5_timeout);
+	if (ctx->cfg.protocol_timeout > 0)
+		prep_timer_target(w, gcp, ctx->cfg.protocol_timeout);
 
 	return 0;
 }

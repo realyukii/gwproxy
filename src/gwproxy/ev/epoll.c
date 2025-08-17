@@ -207,7 +207,7 @@ static int handle_new_client(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		 * does not have a target socket. We will create the target
 		 * socket later, when the client sends a CONNECT command.
 		 */
-		timeout = cfg->socks5_timeout;
+		timeout = cfg->protocol_timeout;
 		fd = -1;
 		gcp->conn_state = CONN_STATE_SOCKS5_DATA;
 		cl_ev_bit = EV_BIT_CLIENT_SOCKS5;

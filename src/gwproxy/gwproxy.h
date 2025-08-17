@@ -27,7 +27,7 @@ struct gwp_cfg {
 	bool		as_socks5;
 	bool		as_http;
 	bool		socks5_prefer_ipv6;
-	int		socks5_timeout;
+	int		protocol_timeout;
 	const char	*socks5_auth_file;
 	int		socks5_dns_cache_secs;
 	int		nr_workers;
