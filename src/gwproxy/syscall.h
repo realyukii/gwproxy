@@ -437,7 +437,7 @@ static inline int __sys_shutdown(int sockfd, int how)
 
 static inline pid_t __sys_gettid(void)
 {
-	return syscall(__NR_gettid);
+	return (pid_t)syscall(__NR_gettid);
 }
 #endif /* #endif __x86_64__ */
 
