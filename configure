@@ -34,6 +34,9 @@ for opt do
 	--cxx=*)
 		cxx="$optarg";
 	;;
+	--use-raw-dns)
+		use_raw_dns="yes";
+	;;
 	--use-io-uring)
 		use_io_uring="yes";
 	;;
@@ -87,6 +90,7 @@ Options: [defaults in brackets after descriptions]
   --cxx=CMD                Use CMD as the C++ compiler
   --debug                  Build with debug enabled
   --use-io-uring           Enable io_uring support (default: no)
+  --use-raw-dns            Enable experimental raw DNS backend (default: no)
   --sanitize               Enable sanitizers (default: no)
 EOF
 exit 0;
@@ -333,6 +337,10 @@ if test "${use_io_uring}" = "yes"; then
 	CXXFLAGS="${CXXFLAGS} -I./src/liburing/src/include";
 fi;
 
+if test "${use_raw_dns}" = "yes"; then
+	add_config "CONFIG_RAW_DNS";
+fi;
+
 if test "${use_sanitize}" = "yes"; then
 	add_config "CONFIG_SANITIZE";
 	if ! add_c_and_cxx_flag "-fsanitize=address"; then
@@ -353,6 +361,26 @@ if test "${use_debug}" = "yes"; then
 else
 	CFLAGS="${CFLAGS} -DNDEBUG";
 	CXXFLAGS="${CXXFLAGS} -DNDEBUG";
+fi;
+
+# ------ Check for getaddrinfo_a() ------
+cat > $tmp_c << EOF
+#include <netdb.h>
+int main(void)
+{
+	struct sigevent ev;
+	struct gaicb *gc = (void *)0;
+	getaddrinfo_a(GAI_NOWAIT, &gc, 1, &ev);
+	return 0;
+}
+EOF
+l="Do we have getaddrinfo_a()?";
+if compile_cc "" "-lanl" "getaddrinfo_a()"; then
+	add_config "CONFIG_HAVE_GETADDRINFO_A";
+	print_supp "yes" "${l}";
+	LIB_LDFLAGS="${LIB_LDFLAGS} -lanl";
+else
+	print_supp "no" "${l}";
 fi;
 
 add_make_var "CC" "${cc}";

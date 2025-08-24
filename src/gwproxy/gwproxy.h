@@ -24,6 +24,7 @@ struct gwp_cfg {
 	const char	*event_loop;
 	const char	*bind;
 	const char	*target;
+	bool		use_raw_dns;
 	bool		as_socks5;
 	bool		as_http;
 	bool		socks5_prefer_ipv6;
