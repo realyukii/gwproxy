@@ -847,7 +847,6 @@ static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	int r, ct = gcp->conn_state;
 
 	assert(gde);
-	assert(gde->ev_fd >= 0);
 	assert(ct == CONN_STATE_SOCKS5_DNS_QUERY ||
 	       ct == CONN_STATE_HTTP_DNS_QUERY);
 
