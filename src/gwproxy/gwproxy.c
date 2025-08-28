@@ -667,7 +667,7 @@ out_err:
 
 static void gwp_ctx_free_socks5(struct gwp_ctx *ctx)
 {
-	assert(ctx->cfg->as_socks5);
+	assert(ctx->cfg.as_socks5);
 	gwp_socks5_ctx_free(ctx->socks5);
 	ctx->socks5 = NULL;
 	pr_dbg(&ctx->lh, "SOCKS5 context freed");
