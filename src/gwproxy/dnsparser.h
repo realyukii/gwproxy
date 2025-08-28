@@ -69,39 +69,17 @@
 #define UDP_MSG_LIMIT 512
 
 typedef enum {
-	OPCODE_QUERY		= 0,	// Standard query (QUERY)
-	OPCODE_IQUERY		= 1,	// Inverse query (IQUERY)
-	OPCODE_STATUS		= 2,	// Server status request (STATUS)
-	OPCODE_RESERVED_MIN	= 3,	// Reserved for future use (inclusive)
-	OPCODE_RESERVED_MAX	= 15	// Reserved for future use (inclusive)
+	OPCODE_QUERY	= 0,	// Standard query (QUERY)
 } gwdns_op;
 
 typedef enum {
 	TYPE_A		= 1,	// IPv4 host address
-	TYPE_NS		= 2,	// an authoritative name server
 	TYPE_CNAME	= 5,	// the canonical name for an alias
-	TYPE_SOA	= 6,	// marks the start of a zone of authority
-	TYPE_MB		= 7,	// a mailbox domain name (EXPERIMENTAL)
-	TYPE_MG		= 8,	// a mail group member (EXPERIMENTAL)
-	TYPE_MR		= 9,	// a mail rename domain name (EXPERIMENTAL)
-	TYPE_NULL	= 10,	// a null RR (EXPERIMENTAL)
-	TYPE_WKS	= 11,	// a well known service description
-	TYPE_PTR	= 12,	// a domain name pointer
-	TYPE_HINFO	= 13,	// host information
-	TYPE_MINFO	= 14,	// mailbox or mail list information
-	TYPE_MX		= 15,	// mail exchange
-	TYPE_TXT	= 16,	// text strings
 	TYPE_AAAA	= 28,	// IPv6 host address
-	QTYPE_AXFR	= 252,	// A request for a transfer of an entire zone
-	QTYPE_MAILB	= 253,	// A request for mailbox-related records (MB, MG or MR)
-	QTYPE_ALL	= 255	// A request for all records
 } gwdns_type;
 
 typedef enum {
 	CLASS_IN	= 1,	// Internet
-	CLASS_CH	= 3,	// CHAOS class
-	CLASS_HS	= 4,	// Hesiod
-	QCLASS_ANY	= 255	// ANY class (matches any class)
 } gwdns_class;
 
 typedef struct {
