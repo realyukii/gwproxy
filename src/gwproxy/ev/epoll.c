@@ -778,6 +778,27 @@ static int handle_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	return 0;
 }
 
+#ifdef CONFIG_RAW_DNS
+static int arm_poll_for_raw_dns_query(struct gwp_wrk *w,
+					struct gwp_conn_pair *gcp)
+{
+	struct gwp_dns_entry *gde = gcp->gde;
+	struct gwp_dns_ctx *dctx;
+	struct gwp_sockaddr addr;
+	uint8_t addrlen;
+	ssize_t r;
+
+	dctx = w->ctx->dns;
+	cp_nsaddr(dctx, &addr, &addrlen);
+	r = __sys_sendto(
+		gde->udp_fd, gde->payload, gde->payloadlen, MSG_NOSIGNAL,
+		&addr.sa, addrlen
+	);
+
+	return (int)r;
+}
+#endif
+
 static int arm_poll_for_dns_query(struct gwp_wrk *w,
 					struct gwp_conn_pair *gcp)
 {
@@ -794,18 +815,7 @@ static int arm_poll_for_dns_query(struct gwp_wrk *w,
 
 	if (w->ctx->cfg.use_raw_dns) {
 #ifdef CONFIG_RAW_DNS
-	struct gwp_dns_ctx *dctx;
-	struct gwp_sockaddr addr;
-	uint8_t addrlen;
-
-	dctx = w->ctx->dns;
-	cp_nsaddr(dctx, &addr, &addrlen);
-	r = __sys_sendto(
-		gde->udp_fd, gde->payload, gde->payloadlen, MSG_NOSIGNAL,
-		&addr.sa, addrlen
-	);
-	if (unlikely(r < 0))
-		return (int)r;
+	arm_poll_for_raw_dns_query(w, gcp);
 
 	r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_ADD, gde->udp_fd, &ev);
 	if (unlikely(r))
@@ -853,7 +863,11 @@ static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	if (w->ctx->cfg.use_raw_dns) {
 #ifdef CONFIG_RAW_DNS
 		r = gwp_dns_process(w->ctx->dns, gde);
-		if (r)
+		if (r == -EAGAIN) {
+			pr_dbg(&w->ctx->lh, "DNS Fallback\n");
+			arm_poll_for_raw_dns_query(w, gcp);
+			return 0;
+		} else if (r)
 			gde->res = r;
 #endif
 	} else {

@@ -264,11 +264,36 @@ int gwp_dns_process(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e)
 		return (int)r;
 
 	r = gwdns_parse_query(e->txid, e->service, buff, r, &ai);
-	if (r)
+	if (r) {
+		if (r == -ENODATA) {
+			uint16_t txid;
+			int af;
+
+			/* Fallback to other family if this one yield no results */
+			switch (ctx->cfg.restyp) {
+			case GWP_DNS_RESTYP_PREFER_IPV4:
+				af = AF_INET6;
+				break;
+			case GWP_DNS_RESTYP_PREFER_IPV6:
+				af = AF_INET;
+				break;
+			default:
+				goto exit_free_ai;
+				break;
+			}
+
+			txid = (uint16_t)rand();
+			r = gwdns_build_query(txid, e->name, af, e->payload, sizeof(e->payload));
+			if (r > 0) {
+				e->txid = txid;
+				e->payloadlen = (int)r;
+				r = -EAGAIN;
+			}
+		}
 		goto exit_free_ai;
+	}
 
 	e->addr = ai->ai_addr;
-	// gwp_dns_find_preferred_addr(ctx, ai, e->name, &e->addr, ctx->cfg.restyp);
 
 exit_free_ai:
 	gwdns_free_parsed_query(ai);
@@ -909,6 +934,7 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 #ifdef CONFIG_RAW_DNS
 	uint16_t txid;
 	ssize_t r;
+	int af;
 #endif
 
 	e = malloc(sizeof(*e));
@@ -917,25 +943,38 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 
 	if (ctx->cfg.use_raw_dns) {
 #ifdef CONFIG_RAW_DNS
-	if (ctx->nr_entries == ctx->entry_cap && realloc_entries(ctx))
-		return NULL;
+		if (ctx->nr_entries == ctx->entry_cap && realloc_entries(ctx))
+			return NULL;
 
-	r = __sys_socket(ctx->ns_addr.sa.sa_family, SOCK_DGRAM | SOCK_NONBLOCK, 0);
-	if (r < 0)
-		goto out_free_e;
-	e->udp_fd = (int)r;
+		r = __sys_socket(ctx->ns_addr.sa.sa_family, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+		if (r < 0)
+			goto out_free_e;
+		e->udp_fd = (int)r;
 
-	txid = (uint16_t)rand();
-	// TODO(reyuki): avoid hard-coded AF_INET and use restyp instead
-	r = gwdns_build_query(txid, name, AF_INET, e->payload, sizeof(e->payload));
-	if (r < 0)
-		goto out_free_e;
-	e->payloadlen = (int)r;
+		switch (ctx->cfg.restyp) {
+		case GWP_DNS_RESTYP_PREFER_IPV4:
+		case GWP_DNS_RESTYP_IPV4_ONLY:
+			af = AF_INET;
+			break;
+		case GWP_DNS_RESTYP_PREFER_IPV6:
+		case GWP_DNS_RESTYP_IPV6_ONLY:
+			af = AF_INET6;
+			break;
+		default:
+			assert(0);
+			break;
+		}
+
+		txid = (uint16_t)rand();
+		r = gwdns_build_query(txid, name, af, e->payload, sizeof(e->payload));
+		if (r < 0)
+			goto out_free_e;
+		e->payloadlen = (int)r;
 #endif
 	} else {
-	e->ev_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-	if (e->ev_fd < 0)
-		goto out_free_e;
+		e->ev_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+		if (e->ev_fd < 0)
+			goto out_free_e;
 	}
 
 	/*
