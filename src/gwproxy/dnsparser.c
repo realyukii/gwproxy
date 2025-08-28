@@ -20,7 +20,7 @@ static ssize_t construct_qname(uint8_t *dst, size_t dst_len, const char *qname)
 			return -ENAMETOOLONG;
 
 		if (c == '.' || c == '\0') {
-			if (l < 1 || l > 255)
+			if (l < 1 || l > DOMAIN_LABEL_LIMIT)
 				return -EINVAL;
 
 			*lp = (uint8_t)l;
@@ -51,14 +51,19 @@ static int calculate_question_len(uint8_t *in, size_t in_len)
 		}
 
 		if (tot_len >= (int)in_len)
-			return -ENAMETOOLONG;
+			return -ENOBUFS;
 
 		advance_len = *p + 1;
 		tot_len += advance_len;
 		p += advance_len;
 	}
 
+	if (tot_len > DOMAIN_NAME_LIMIT)
+		return -ENAMETOOLONG;
+
 	tot_len += 4;
+	if (tot_len >= (int)in_len)
+		return -ENOBUFS;
 
 	return  tot_len;
 }
@@ -133,7 +138,8 @@ static int serialize_answ(uint16_t txid, uint8_t *in, size_t in_len, gwdns_answ_
 		}
 
 		memcpy(&is_compressed, &in[idx], sizeof(is_compressed));
-		is_compressed = DNS_IS_COMPRESSED(ntohs(is_compressed));
+		is_compressed = ntohs(is_compressed);
+		is_compressed = DNS_IS_COMPRESSED(is_compressed);
 		assert(is_compressed);
 		idx += 2; // NAME
 		if (idx >= in_len) {
@@ -169,21 +175,33 @@ static int serialize_answ(uint16_t txid, uint8_t *in, size_t in_len, gwdns_answ_
 
 		memcpy(&rdlength, &in[idx], sizeof(rdlength));
 		rdlength = ntohs(rdlength);
-		if (item->rr_type != TYPE_AAAA && item->rr_type != TYPE_A) {
+		switch (item->rr_type) {
+		case TYPE_AAAA:
+			if (rdlength != sizeof(struct in6_addr)) {
+				ret = -EINVAL;
+				free(item);
+				goto exit_free;
+			}
+			break;
+		case TYPE_A:
+			if (rdlength != sizeof(struct in_addr)) {
+				ret = -EINVAL;
+				free(item);
+				goto exit_free;
+			}
+			break;
+		case TYPE_CNAME:
+			idx += 2 + rdlength;
+			free(item);
+			continue;
+
+		default:
 			ret = -EINVAL;
 			free(item);
 			goto exit_free;
+			break;
 		}
-		if (item->rr_type == TYPE_AAAA && rdlength != sizeof(struct in6_addr)) {
-			ret = -EINVAL;
-			free(item);
-			goto exit_free;
-		}
-		if (item->rr_type == TYPE_A && rdlength != sizeof(struct in_addr)) {
-			ret = -EINVAL;
-			free(item);
-			goto exit_free;
-		}
+
 		item->rdlength = rdlength;
 		idx += 2;
 		if (idx >= in_len) {
@@ -192,13 +210,6 @@ static int serialize_answ(uint16_t txid, uint8_t *in, size_t in_len, gwdns_answ_
 			goto exit_free;
 		}
 
-		/*
-		 * considering if condition above,
-		 * maybe we don't need a malloc and just allocate fixed size
-		 * for rdata? however if this parser want to be expanded for
-		 * other dns operation (e.g OPCODE_IQUERY, etc), rdata maybe
-		 * contain more than sizeof in6_addr.
-		 */
 		ptr = malloc(rdlength);
 		if (!ptr) {
 			ret = -ENOMEM;
@@ -216,8 +227,13 @@ static int serialize_answ(uint16_t txid, uint8_t *in, size_t in_len, gwdns_answ_
 		}
 
 		item->rdata = ptr;
-		out->rr_answ[i] = item;
+		out->rr_answ[out->hdr.ancount] = item;
 		out->hdr.ancount++;
+	}
+
+	if (!out->hdr.ancount) {
+		free(out->rr_answ);
+		return -ENODATA;
 	}
 
 	return 0;
@@ -258,10 +274,7 @@ int gwdns_parse_query(uint16_t txid, const char *service,
 	if (r)
 		return r;
 
-	if (!raw_answ.hdr.ancount)
-		goto exit_free;
-
-	tail = NULL;
+	results = tail = NULL;
 	for (i = 0; i < raw_answ.hdr.ancount; i++) {
 		struct gwdns_addrinfo_node *new_node;
 		gwdns_serialized_answ *answ;
