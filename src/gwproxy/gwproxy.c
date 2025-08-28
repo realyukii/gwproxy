@@ -1246,7 +1246,6 @@ int gwp_socks5_prepare_target_addr(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	struct gwp_socks5_addr *dst;
 
 	assert(sc);
-	assert(sc->state == CONN_STATE_SOCKS5_CONNECT);
 
 	dst = &sc->dst_addr;
 	memset(ta, 0, sizeof(*ta));
