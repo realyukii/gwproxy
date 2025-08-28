@@ -156,6 +156,17 @@ jobs:
             make test;
           fi;
 
+      - name: Build with --debug
+        if: ${{matrix.build_args.sanitize == '0'}}
+        run: |
+          make clean;
+          CFLAGS=-Werror ./configure --cc=${{matrix.build_args.cc}} --debug;
+          make -j$(nproc);
+          # Only test for x86_64
+          if [ "${{matrix.build_args.arch}}" = "x86_64" ]; then
+            make test;
+          fi;
+
       - name: Build default (with sanitizer)
         if: ${{matrix.build_args.sanitize == '1'}}
         run: |
@@ -177,6 +188,15 @@ jobs:
             make test;
           fi;
 
+      - name: Build with io-uring and --debug
+        run: |
+          rm -vf config.h config.log config.make;
+          make clean;
+          CFLAGS=-Werror ./configure --use-io-uring --debug;
+          make -j$(nproc);
+          if [ "${{matrix.build_args.arch}}" = "x86_64" ]; then
+            make test;
+          fi;
 
   alpine-musl-build:
     needs: get_commit_list
@@ -219,6 +239,16 @@ jobs:
             make test;
           fi;
 
+      - name: Build with --debug
+        shell: alpine.sh {0}
+        run: |
+          make clean;
+          CFLAGS=-Werror ./configure --cc=gcc --debug;
+          make -j$(nproc);
+          if [ "${{matrix.build_args.arch}}" = "x86_64" ]; then
+            make test;
+          fi;
+
       - name: Build with io-uring
         shell: alpine.sh {0}
         run: |
@@ -230,6 +260,16 @@ jobs:
             make test;
           fi;
 
+      - name: Build with io-uring and --debug
+        shell: alpine.sh {0}
+        run: |
+          rm -vf config.h config.log config.make;
+          make clean;
+          CFLAGS=-Werror ./configure --cc=gcc --use-io-uring --debug;
+          make -j$(nproc);
+          if [ "${{matrix.build_args.arch}}" = "x86_64" ]; then
+            make test;
+          fi;
 
   codespell:
     needs: get_commit_list
