@@ -815,8 +815,7 @@ int gwp_dns_ctx_init(struct gwp_dns_ctx **ctx_p, const struct gwp_dns_cfg *cfg)
 
 	if (cfg->use_raw_dns) {
 #ifdef CONFIG_RAW_DNS
-	// r = convert_str_to_ssaddr(cfg->ns_addr_str, &ctx->ns_addr, 53);
-	r = convert_str_to_ssaddr("1.1.1.1", &ctx->ns_addr, 53);
+	r = convert_str_to_ssaddr(cfg->ns_addr_str, &ctx->ns_addr, 53);
 	if (r)
 		goto out_destroy_mutex;
 	ctx->ns_addrlen = ctx->ns_addr.sa.sa_family == AF_INET

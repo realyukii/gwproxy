@@ -45,6 +45,9 @@
 static const struct option long_opts[] = {
 	{ "help",		no_argument,		NULL,	'h' },
 	{ "raw-dns",		required_argument,	NULL,	'r' },
+#ifdef CONFIG_RAW_DNS
+	{ "dns-server",		required_argument,	NULL,	'j' },
+#endif
 	{ "event-loop",		required_argument,	NULL,	'e' },
 	{ "bind",		required_argument,	NULL,	'b' },
 	{ "target",		required_argument,	NULL,	't' },
@@ -94,6 +97,9 @@ static const struct gwp_cfg default_opts = {
 	.log_level		= 3,
 	.log_file		= "/dev/stdout",
 	.pid_file		= NULL,
+#ifdef CONFIG_RAW_DNS
+	.ns_addr_str		= "1.1.1.1"
+#endif
 };
 
 __cold
@@ -105,6 +111,9 @@ static void show_help(const char *app)
 	printf("  -e, --event-loop=name           Specify the event loop to use (default: %s)\n", default_opts.event_loop);
 	printf("                                  Available values: epoll, io_uring\n");
 	printf("  -r, --raw-dns=0|1               Use experimental raw DNS as the backend (default: %d)\n", default_opts.use_raw_dns);
+#ifdef CONFIG_RAW_DNS
+	printf("  -j, --dns-server=addr           DNS server address (default: %s)\n", default_opts.ns_addr_str);
+#endif
 	printf("  -b, --bind=addr:port            Bind to the specified address (default: %s)\n", default_opts.bind);
 	printf("  -t, --target=addr_port          Target address to connect to\n");
 	printf("  -S, --as-socks5=0|1             Run as a SOCKS5 proxy (default: %d)\n", default_opts.as_socks5);
@@ -228,6 +237,11 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 		case 'p':
 			cfg->pid_file = optarg;
 			break;
+#ifdef CONFIG_RAW_DNS
+		case 'j':
+			cfg->ns_addr_str = optarg;
+			break;
+#endif
 		default:
 			fprintf(stderr, "Unknown option: %c\n", c);
 			show_help(argv[0]);
@@ -693,7 +707,9 @@ static int gwp_ctx_init_dns(struct gwp_ctx *ctx)
 		.cache_expiry = cfg->socks5_dns_cache_secs,
 		.restyp = cfg->socks5_prefer_ipv6 ? GWP_DNS_RESTYP_PREFER_IPV6 : 0,
 		.nr_workers = 1,
-		// .ns_addr_str = "1.1.1.1"
+#ifdef CONFIG_RAW_DNS
+		.ns_addr_str = cfg->ns_addr_str
+#endif
 	};
 	int r;
 

@@ -44,6 +44,9 @@ struct gwp_cfg {
 	int		log_level;
 	const char	*log_file;
 	const char	*pid_file;
+#ifdef CONFIG_RAW_DNS
+	const char	*ns_addr_str;
+#endif
 };
 
 struct gwp_ctx;
