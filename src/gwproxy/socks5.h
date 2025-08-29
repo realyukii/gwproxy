@@ -91,7 +91,7 @@ int gwp_socks5_ctx_init(struct gwp_socks5_ctx **ctx_p,
 
 /**
  * Free the resources associated with a SOCKS5 context.
- * 
+ *
  * @param ctx	The SOCKS5 context to free. If NULL, this function does
  * 		nothing.
  */
@@ -141,7 +141,7 @@ void gwp_socks5_conn_free(struct gwp_socks5_conn *conn);
  * 			written to `out_buf` or the required size if there
  * 			is not enough space.
  * @return		0 on success, or a negative error code on failure.
- * 
+ *
  * Error values:
  *
  * -ENOMEM:	Not enough memory to handle the request.

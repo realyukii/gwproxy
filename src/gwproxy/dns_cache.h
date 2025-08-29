@@ -49,7 +49,7 @@ struct gwp_dns_cache;
  * Initialize a DNS cache and fills the provided pointer with a new cache
  * instance. When the cache is no longer needed, it should be freed using
  * `gwp_dns_cache_free()`.
- * 
+ *
  * @param cache_p	Pointer to the cache pointer that will be initialized.
  * @param nr_buckets	Number of buckets for the hash map.
  * @return int		0 on success, negative error code on failure.
@@ -58,7 +58,7 @@ int gwp_dns_cache_init(struct gwp_dns_cache **cache_p, uint32_t nr_buckets);
 
 /**
  * Free the DNS cache and all its resources.
- * 
+ *
  * @param cache	The DNS cache to free.
  */
 void gwp_dns_cache_free(struct gwp_dns_cache *cache);
@@ -76,26 +76,26 @@ void gwp_dns_cache_housekeep(struct gwp_dns_cache *cache);
  * entry if it exists. It increments the reference count of the
  * entry, so it can be safely used even after the cache is freed
  * using `gwp_dns_cache_free()`.
- * 
+ *
  * `gwp_dns_cache_putent()` MUST be called to release the reference
  * count when the entry is no longer needed.
- * 
+ *
  * @param cache	The DNS cache to look up the entry in.
  * @param key 	The key to look up, typically a domain name.
  * @param ep	Pointer to a pointer that will be filled with the found entry.
  * @return int	0 on success, negative error code on failure.
- * 
+ *
  * Error codes:
  * -ENOENT: Entry not found.
  */
-int gwp_dns_cache_getent(struct gwp_dns_cache *cache, const char *key, 
+int gwp_dns_cache_getent(struct gwp_dns_cache *cache, const char *key,
 			 struct gwp_dns_cache_entry **ep);
 
 /**
  * Decrement the reference count of a DNS cache entry. If the
  * reference count reaches zero, the entry is freed. This function
  * should be called when the entry is no longer needed.
- * 
+ *
  * @param e	The DNS cache entry to put.
  */
 void gwp_dns_cache_putent(struct gwp_dns_cache_entry *e);

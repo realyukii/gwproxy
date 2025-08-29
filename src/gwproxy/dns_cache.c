@@ -395,7 +395,7 @@ int gwp_dns_cache_insert(struct gwp_dns_cache *cache, const char *key,
 	return r;
 }
 
-int gwp_dns_cache_getent(struct gwp_dns_cache *cache, const char *key, 
+int gwp_dns_cache_getent(struct gwp_dns_cache *cache, const char *key,
 			 struct gwp_dns_cache_entry **ep)
 {
 	struct dns_cache_entry *de = NULL;

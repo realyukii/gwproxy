@@ -349,7 +349,7 @@ static int gwp_ctx_init_thread_sock(struct gwp_wrk *w,
 				    const struct gwp_sockaddr *ba)
 {
 	struct gwp_ctx *ctx = w->ctx;
-	int type = SOCK_STREAM | SOCK_CLOEXEC | 
+	int type = SOCK_STREAM | SOCK_CLOEXEC |
 			(ctx->ev_used == GWP_EV_EPOLL ? SOCK_NONBLOCK : 0);
 	struct gwp_cfg *cfg = &w->ctx->cfg;
 	socklen_t slen;
