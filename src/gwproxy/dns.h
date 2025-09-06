@@ -16,7 +16,6 @@
 struct gwp_dns_entry {
 #ifdef CONFIG_RAW_DNS
 	uint32_t		idx;
-	int			udp_fd;
 	int			payloadlen;
 	union {
 		uint16_t	txid;
@@ -27,7 +26,11 @@ struct gwp_dns_entry {
 	char			*service;
 	_Atomic(int)		refcnt;
 	int			res;
-	int			ev_fd;
+	union {
+		int		udp_fd;
+		int		ev_fd;
+		int		fd;
+	};
 	struct gwp_sockaddr	addr;
 	struct gwp_dns_entry	*next;
 };
@@ -52,7 +55,25 @@ struct gwp_dns_cfg {
 #endif
 };
 
-struct gwp_dns_ctx;
+struct gwp_dns_ctx {
+#ifdef CONFIG_RAW_DNS
+	uint32_t		entry_cap;
+	struct gwp_dns_entry	**entries;
+	struct gwp_sockaddr	ns_addr;
+	uint8_t			ns_addrlen;
+#endif
+	volatile bool		should_stop;
+	pthread_mutex_t		lock;
+	pthread_cond_t		cond;
+	uint32_t		nr_sleeping;
+	uint32_t		nr_entries;
+	struct gwp_dns_entry	*head;
+	struct gwp_dns_entry	*tail;
+	struct gwp_dns_wrk	*workers;
+	struct gwp_dns_cache	*cache;
+	time_t			last_scan;
+	struct gwp_dns_cfg	cfg;
+};
 
 /**
  * Initialize the DNS context. Stores the context in `*ctx_p`. When
@@ -102,8 +123,6 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 bool gwp_dns_entry_put(struct gwp_dns_entry *entry);
 
 #ifdef CONFIG_RAW_DNS
-
-void cp_nsaddr(struct gwp_dns_ctx *ctx, struct gwp_sockaddr *addr, uint8_t *addrlen);
 
 void gwp_dns_raw_entry_free(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e);
 
