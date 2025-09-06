@@ -57,6 +57,7 @@ struct gwp_dns_cfg {
 
 struct gwp_dns_ctx {
 #ifdef CONFIG_RAW_DNS
+	_Atomic(uint16_t)	current_txid;
 	uint32_t		entry_cap;
 	struct gwp_dns_entry	**entries;
 	struct gwp_sockaddr	ns_addr;

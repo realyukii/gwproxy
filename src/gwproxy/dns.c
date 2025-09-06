@@ -222,7 +222,6 @@ static bool realloc_entries(struct gwp_dns_ctx *ctx)
 
 static int attempt_fallback(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e)
 {
-	uint16_t txid;
 	int af, r;
 
 	/* Fallback to other family if this one yield no results */
@@ -238,10 +237,10 @@ static int attempt_fallback(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e)
 		return -EINVAL;
 	}
 
-	txid = (uint16_t)rand();
-	r = gwdns_build_query(txid, e->name, af, e->payload, sizeof(e->payload));
+	r = gwdns_build_query(atomic_fetch_add(&ctx->current_txid, 1),
+				e->name, af, e->payload, sizeof(e->payload));
 	if (r > 0) {
-		e->txid = txid;
+		e->txid = atomic_load(&ctx->current_txid);
 		e->payloadlen = (int)r;
 		r = -EAGAIN;
 	}
@@ -824,6 +823,7 @@ int gwp_dns_ctx_init(struct gwp_dns_ctx **ctx_p, const struct gwp_dns_cfg *cfg)
 		ctx->ns_addrlen = ctx->ns_addr.sa.sa_family == AF_INET
 				? sizeof(ctx->ns_addr.i4)
 				: sizeof(ctx->ns_addr.i6);
+		atomic_init(&ctx->current_txid, 0);
 		ctx->entry_cap = DEFAULT_ENTRIES_CAP;
 		ctx->entries = malloc(ctx->entry_cap * sizeof(*ctx->entries));
 		if (!ctx->entries) {
@@ -918,7 +918,6 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 
 	if (ctx->cfg.use_raw_dns) {
 #ifdef CONFIG_RAW_DNS
-		uint16_t txid;
 		ssize_t r;
 		int af;
 
@@ -944,8 +943,8 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 			goto out_close_fd;
 		}
 
-		txid = (uint16_t)rand();
-		r = gwdns_build_query(txid, name, af, e->payload, sizeof(e->payload));
+		r = gwdns_build_query(atomic_fetch_add(&ctx->current_txid, 1),
+				      name, af, e->payload, sizeof(e->payload));
 		if (r < 0)
 			goto out_close_fd;
 		e->payloadlen = (int)r;
