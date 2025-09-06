@@ -788,7 +788,7 @@ static int send_raw_dns_query(struct gwp_wrk *w,
 
 	dctx = w->ctx->dns;
 	r = __sys_sendto(
-		gde->udp_fd, gde->payload, gde->payloadlen, MSG_NOSIGNAL,
+		dctx->udp_fd, gde->payload, gde->payloadlen, MSG_NOSIGNAL,
 		&dctx->ns_addr.sa, dctx->ns_addrlen
 	);
 	if (r < 0)
@@ -817,10 +817,6 @@ static int arm_poll_for_dns_query(struct gwp_wrk *w,
 		r = send_raw_dns_query(w, gcp);
 		if (r)
 			return r;
-
-		r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_ADD, gde->udp_fd, &ev);
-		if (unlikely(r))
-			return (int)r;
 #endif
 	} else {
 		assert(gde->ev_fd >= 0);
@@ -1162,6 +1158,18 @@ int gwp_ctx_thread_entry_epoll(struct gwp_wrk *w)
 {
 	struct gwp_ctx *ctx = w->ctx;
 	int r = 0;
+
+	if (ctx->cfg.use_raw_dns) {
+#ifdef CONFIG_RAW_DNS
+		struct epoll_event ev;
+
+		ev.events = EPOLLIN;
+		ev.data.ptr = NULL;
+		r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_ADD, ctx->dns->udp_fd, &ev);
+		if (unlikely(r))
+			return (int)r;
+#endif
+	}
 
 	pr_info(&ctx->lh, "Worker %u started (epoll)", w->idx);
 
