@@ -1022,7 +1022,7 @@ int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	if (gcp->gde) {
 		if (w->ctx->cfg.use_raw_dns) {
 #ifdef CONFIG_RAW_DNS
-		gwp_dns_raw_entry_free(w->ctx->dns, gcp->gde);
+			gwp_dns_raw_entry_free(w->ctx->dns, gcp->gde);
 #endif
 		} else {
 			gwp_dns_entry_put(gcp->gde);
