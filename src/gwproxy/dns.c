@@ -172,8 +172,6 @@ int gwp_dns_resolve(struct gwp_dns_ctx *ctx, const char *name,
 static void _gwp_dns_entry_free(struct gwp_dns_entry *e)
 {
 	assert(e);
-	assert(e->udp_fd >= 0);
-	__sys_close(e->udp_fd);
 	free(e->name);
 	free(e);
 }
@@ -255,7 +253,7 @@ int gwp_dns_process(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e)
 	ssize_t r;
 
 	r = __sys_recvfrom(
-		e->udp_fd, buff, sizeof(buff), 0,
+		ctx->udp_fd, buff, sizeof(buff), 0,
 		&ctx->ns_addr.sa, (socklen_t *)&ctx->ns_addrlen
 	);
 	if (r < 0)
@@ -824,9 +822,15 @@ int gwp_dns_ctx_init(struct gwp_dns_ctx **ctx_p, const struct gwp_dns_cfg *cfg)
 				? sizeof(ctx->ns_addr.i4)
 				: sizeof(ctx->ns_addr.i6);
 		atomic_init(&ctx->current_txid, 0);
+
+		r = __sys_socket(ctx->ns_addr.sa.sa_family, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+		if (r < 0)
+			goto out_destroy_mutex;
+		ctx->udp_fd = r;
 		ctx->entry_cap = DEFAULT_ENTRIES_CAP;
 		ctx->entries = malloc(ctx->entry_cap * sizeof(*ctx->entries));
 		if (!ctx->entries) {
+			__sys_close(r);
 			r = -ENOMEM;
 			goto out_destroy_mutex;
 		}
@@ -924,11 +928,6 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 		if (ctx->nr_entries == ctx->entry_cap && realloc_entries(ctx))
 			return NULL;
 
-		r = __sys_socket(ctx->ns_addr.sa.sa_family, SOCK_DGRAM | SOCK_NONBLOCK, 0);
-		if (r < 0)
-			goto out_free_e;
-		e->udp_fd = (int)r;
-
 		switch (ctx->cfg.restyp) {
 		case GWP_DNS_RESTYP_PREFER_IPV4:
 		case GWP_DNS_RESTYP_IPV4_ONLY:
@@ -940,13 +939,13 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 			break;
 		default:
 			assert(0);
-			goto out_close_fd;
+			goto out_free_e;
 		}
 
 		r = gwdns_build_query(atomic_fetch_add(&ctx->current_txid, 1),
 				      name, af, e->payload, sizeof(e->payload));
 		if (r < 0)
-			goto out_close_fd;
+			goto out_free_e;
 		e->payloadlen = (int)r;
 #endif
 	} else {
@@ -988,7 +987,7 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 	return e;
 
 out_close_fd:
-	__sys_close(e->fd);
+	__sys_close(e->ev_fd);
 out_free_e:
 	free(e);
 	return NULL;

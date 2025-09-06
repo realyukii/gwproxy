@@ -26,11 +26,7 @@ struct gwp_dns_entry {
 	char			*service;
 	_Atomic(int)		refcnt;
 	int			res;
-	union {
-		int		udp_fd;
-		int		ev_fd;
-		int		fd;
-	};
+	int			ev_fd;
 	struct gwp_sockaddr	addr;
 	struct gwp_dns_entry	*next;
 };
@@ -57,6 +53,7 @@ struct gwp_dns_cfg {
 
 struct gwp_dns_ctx {
 #ifdef CONFIG_RAW_DNS
+	int			udp_fd;
 	_Atomic(uint16_t)	current_txid;
 	uint32_t		entry_cap;
 	struct gwp_dns_entry	**entries;
