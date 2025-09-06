@@ -199,6 +199,7 @@ static void free_all_queued_entries(struct gwp_dns_ctx *ctx)
 		_gwp_dns_entry_free(e);
 	}
 
+	__sys_close(ctx->udp_fd);
 	free(ctx->entries);
 }
 
@@ -238,7 +239,6 @@ static int attempt_fallback(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e)
 	r = gwdns_build_query(atomic_fetch_add(&ctx->current_txid, 1),
 				e->name, af, e->payload, sizeof(e->payload));
 	if (r > 0) {
-		e->txid = atomic_load(&ctx->current_txid);
 		e->payloadlen = (int)r;
 		r = -EAGAIN;
 	}
