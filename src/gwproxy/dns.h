@@ -53,12 +53,10 @@ struct gwp_dns_cfg {
 
 struct gwp_dns_ctx {
 #ifdef CONFIG_RAW_DNS
-	int			udp_fd;
-	_Atomic(uint16_t)	current_txid;
 	uint32_t		entry_cap;
 	struct gwp_dns_entry	**entries;
 	struct gwp_sockaddr	ns_addr;
-	uint8_t			ns_addrlen;
+	socklen_t		ns_addrlen;
 #endif
 	volatile bool		should_stop;
 	pthread_mutex_t		lock;
@@ -110,6 +108,7 @@ void gwp_dns_ctx_free(struct gwp_dns_ctx *ctx);
  */
 struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 				    const char *name, const char *service);
+
 /**
  * Release a DNS entry. This function decrements the reference count of the
  * entry. If the reference count reaches zero, the entry is freed.
@@ -121,10 +120,12 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 bool gwp_dns_entry_put(struct gwp_dns_entry *entry);
 
 #ifdef CONFIG_RAW_DNS
+struct gwp_dns_entry *gwp_raw_dns_queue(uint16_t txid, struct gwp_dns_ctx *ctx,
+				    const char *name, const char *service);
 
 void gwp_dns_raw_entry_free(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e);
 
-int gwp_dns_process(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e);
+int gwp_dns_process(uint8_t buff[UDP_MSG_LIMIT], int bufflen, struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e);
 #endif
 
 /**

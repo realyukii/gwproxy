@@ -200,6 +200,10 @@ struct iou {
 
 struct gwp_wrk {
 	int			tcp_fd;
+	int			udp_fd;
+	uint16_t		current_txid;
+	/* Mapping DNS queries to the corresponding proxy session */
+	struct gwp_conn_pair	*session_map[65536];
 	struct gwp_conn_slot	conn_slot;
 
 	union {

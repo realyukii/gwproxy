@@ -199,7 +199,6 @@ static void free_all_queued_entries(struct gwp_dns_ctx *ctx)
 		_gwp_dns_entry_free(e);
 	}
 
-	__sys_close(ctx->udp_fd);
 	free(ctx->entries);
 }
 
@@ -236,32 +235,22 @@ static int attempt_fallback(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e)
 		return -EINVAL;
 	}
 
-	r = gwdns_build_query(atomic_fetch_add(&ctx->current_txid, 1),
+	r = (int)gwdns_build_query(e->txid,
 				e->name, af, e->payload, sizeof(e->payload));
 	if (r > 0) {
-		e->payloadlen = (int)r;
+		e->payloadlen = r;
 		r = -EAGAIN;
 	}
 
 	return r;
 }
 
-int gwp_dns_process(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e)
+int gwp_dns_process(uint8_t buff[UDP_MSG_LIMIT], int bufflen, struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e)
 {
 	struct gwdns_addrinfo_node *ai;
-	uint8_t buff[UDP_MSG_LIMIT];
 	ssize_t r;
 
-	r = __sys_recvfrom(
-		ctx->udp_fd, buff, sizeof(buff), 0,
-		&ctx->ns_addr.sa, (socklen_t *)&ctx->ns_addrlen
-	);
-	if (r < 0)
-		return (int)r;
-	if (r < 38)
-		return -EINVAL;
-
-	r = gwdns_parse_query(e->txid, e->service, buff, r, &ai);
+	r = gwdns_parse_query(e->txid, e->service, buff, bufflen, &ai);
 	if (r) {
 		if (r == -ENODATA)
 			r = attempt_fallback(ctx, e);
@@ -274,6 +263,72 @@ exit_free_ai:
 	gwdns_free_parsed_query(ai);
 	return (int)r;
 }
+
+struct gwp_dns_entry *gwp_raw_dns_queue(uint16_t txid, struct gwp_dns_ctx *ctx,
+				    const char *name, const char *service)
+{
+	struct gwp_dns_entry *e;
+	size_t nl, sl;
+	ssize_t r;
+	int af;
+
+	e = malloc(sizeof(*e));
+	if (!e)
+		return NULL;
+
+	if (ctx->nr_entries == ctx->entry_cap && realloc_entries(ctx))
+		return NULL;
+
+	switch (ctx->cfg.restyp) {
+	case GWP_DNS_RESTYP_PREFER_IPV4:
+	case GWP_DNS_RESTYP_IPV4_ONLY:
+		af = AF_INET;
+		break;
+	case GWP_DNS_RESTYP_PREFER_IPV6:
+	case GWP_DNS_RESTYP_IPV6_ONLY:
+		af = AF_INET6;
+		break;
+	default:
+		assert(0);
+		goto out_free_e;
+	}
+
+	r = gwdns_build_query(txid,
+				name, af, e->payload, sizeof(e->payload));
+	if (r < 0)
+		goto out_free_e;
+	e->payloadlen = (int)r;
+	
+	/*
+	 * Merge name and service into a single allocated string to
+	 * avoid multiple allocations.
+	 *
+	 * The format is: "<name>\0<service>\0" where both name and
+	 * service are null-terminated strings.
+	 */
+	nl = strlen(name);
+	sl = service ? strlen(service) : 0;
+	e->name = malloc(nl + 1 + sl + 1);
+	if (!e->name)
+		goto out_free_e;
+
+	e->service = e->name + nl + 1;
+	memcpy(e->name, name, nl + 1);
+	if (service)
+		memcpy(e->service, service, sl + 1);
+	else
+		e->service[0] = '\0';
+
+	e->res = 0;
+	e->idx = ctx->nr_entries++;
+	ctx->entries[e->idx] = e;
+
+	return e;
+out_free_e:
+	free(e);
+	return NULL;
+}
+
 #endif /* #ifdef CONFIG_RAW_DNS */
 
 static void gwp_dns_entry_free(struct gwp_dns_entry *e)
@@ -821,12 +876,6 @@ int gwp_dns_ctx_init(struct gwp_dns_ctx **ctx_p, const struct gwp_dns_cfg *cfg)
 		ctx->ns_addrlen = ctx->ns_addr.sa.sa_family == AF_INET
 				? sizeof(ctx->ns_addr.i4)
 				: sizeof(ctx->ns_addr.i6);
-		atomic_init(&ctx->current_txid, 0);
-
-		r = __sys_socket(ctx->ns_addr.sa.sa_family, SOCK_DGRAM | SOCK_NONBLOCK, 0);
-		if (r < 0)
-			goto out_destroy_mutex;
-		ctx->udp_fd = r;
 		ctx->entry_cap = DEFAULT_ENTRIES_CAP;
 		ctx->entries = malloc(ctx->entry_cap * sizeof(*ctx->entries));
 		if (!ctx->entries) {
@@ -920,39 +969,9 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 	if (!e)
 		return NULL;
 
-	if (ctx->cfg.use_raw_dns) {
-#ifdef CONFIG_RAW_DNS
-		ssize_t r;
-		int af;
-
-		if (ctx->nr_entries == ctx->entry_cap && realloc_entries(ctx))
-			return NULL;
-
-		switch (ctx->cfg.restyp) {
-		case GWP_DNS_RESTYP_PREFER_IPV4:
-		case GWP_DNS_RESTYP_IPV4_ONLY:
-			af = AF_INET;
-			break;
-		case GWP_DNS_RESTYP_PREFER_IPV6:
-		case GWP_DNS_RESTYP_IPV6_ONLY:
-			af = AF_INET6;
-			break;
-		default:
-			assert(0);
-			goto out_free_e;
-		}
-
-		r = gwdns_build_query(atomic_fetch_add(&ctx->current_txid, 1),
-				      name, af, e->payload, sizeof(e->payload));
-		if (r < 0)
-			goto out_free_e;
-		e->payloadlen = (int)r;
-#endif
-	} else {
-		e->ev_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-		if (e->ev_fd < 0)
-			goto out_free_e;
-	}
+	e->ev_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	if (e->ev_fd < 0)
+		goto out_free_e;
 
 	/*
 	 * Merge name and service into a single allocated string to
@@ -975,15 +994,9 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 		e->service[0] = '\0';
 
 	e->res = 0;
-	if (ctx->cfg.use_raw_dns) {
-#ifdef CONFIG_RAW_DNS
-		e->idx = ctx->nr_entries++;
-		ctx->entries[e->idx] = e;
-#endif
-	} else {
-		atomic_init(&e->refcnt, 2);
-		push_queue(ctx, e);
-	}
+	atomic_init(&e->refcnt, 2);
+	push_queue(ctx, e);
+
 	return e;
 
 out_close_fd:

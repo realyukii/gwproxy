@@ -369,6 +369,17 @@ static int gwp_ctx_init_thread_sock(struct gwp_wrk *w,
 	socklen_t slen;
 	int fd, r, v;
 
+	if (w->ctx->cfg.use_raw_dns) {
+#ifdef CONFIG_RAW_DNS
+		fd = __sys_socket(w->ctx->dns->ns_addr.sa.sa_family, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+		if (fd < 0) {
+			pr_err(&w->ctx->lh, "Failed to create udp_fd: %s\n", strerror(-fd));
+			return fd;
+		}
+		w->udp_fd = fd;
+#endif
+	}
+
 	r = ba->sa.sa_family;
 	if (r == AF_INET) {
 		slen = sizeof(struct sockaddr_in);
@@ -415,6 +426,9 @@ out_close:
 __cold
 static void gwp_ctx_free_thread_sock(struct gwp_wrk *w)
 {
+	if (w->ctx->cfg.use_raw_dns)
+		__sys_close(w->udp_fd);
+
 	if (w->tcp_fd >= 0) {
 		__sys_close(w->tcp_fd);
 		pr_dbg(&w->ctx->lh, "Worker %u socket closed (fd=%d)", w->idx,
@@ -472,6 +486,9 @@ static int gwp_ctx_init_thread(struct gwp_wrk *w,
 		pr_err(&ctx->lh, "gwp_ctx_init_thread_sock: %s\n", strerror(-r));
 		return r;
 	}
+
+	w->current_txid = 0;
+	memset(w->session_map, 0, sizeof(w->session_map));
 
 	r = gwp_ctx_init_thread_event(w);
 	if (r < 0) {
@@ -1022,6 +1039,8 @@ int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	if (gcp->gde) {
 		if (w->ctx->cfg.use_raw_dns) {
 #ifdef CONFIG_RAW_DNS
+			pr_dbg(&w->ctx->lh, "client disconnected before query for %s resolved", gcp->gde->name);
+			w->session_map[gcp->gde->txid] = NULL;
 			gwp_dns_raw_entry_free(w->ctx->dns, gcp->gde);
 #endif
 		} else {
@@ -1226,9 +1245,20 @@ static int queue_dns_resolution(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 				const char *host, const char *port)
 {
 	struct gwp_dns_ctx *dns = w->ctx->dns;
-	struct gwp_dns_entry *gde;
+	struct gwp_dns_entry *gde = NULL;
 
-	gde = gwp_dns_queue(dns, host, port);
+	if (w->ctx->cfg.use_raw_dns) {
+#ifdef CONFIG_RAW_DNS
+		gde = gwp_raw_dns_queue(w->current_txid, dns, host, port);
+		if (!gde)
+			return -ENOMEM;
+		pr_dbg(&w->ctx->lh, "constructing standard DNS query packet for %s", host);
+		w->session_map[w->current_txid++] = gcp;
+#endif
+	} else {
+		gde = gwp_dns_queue(dns, host, port);
+	}
+
 	if (unlikely(!gde)) {
 		pr_err(&w->ctx->lh, "Failed to allocate DNS entry for %s:%s", host, port);
 		return -ENOMEM;
