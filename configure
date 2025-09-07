@@ -296,33 +296,33 @@ print_config "CXX" "${cxx}";
 set +e;
 
 printf "\n%s:\n" "-W flags";
-add_c_and_cxx_flag "-Wall";
-add_c_and_cxx_flag "-Wextra";
-add_c_and_cxx_flag "-Wsequence-point";
-add_c_and_cxx_flag "-Wunreachable-code";
-add_c_and_cxx_flag "-Wunreachable-code-loop-increment";
-add_c_and_cxx_flag "-Wformat-signedness";
-add_c_and_cxx_flag "-Wformat-security";
-add_c_and_cxx_flag "-Wformat";
-add_c_and_cxx_flag "-Wstack-usage=8192";
-add_c_and_cxx_flag "-Wmissing-prototypes";
-add_c_and_cxx_flag "-Wstrict-prototypes";
-add_c_and_cxx_flag "-Wmissing-variable-declarations";
-add_c_and_cxx_flag "-Wstrict-aliasing=3";
-add_c_and_cxx_flag "-Wshorten-64-to-32";
-add_c_and_cxx_flag "-Wunsafe-loop-optimizations";
-add_c_and_cxx_flag "-Wno-format-truncation";
+add_c_flag "-Wall";
+add_c_flag "-Wextra";
+add_c_flag "-Wsequence-point";
+add_c_flag "-Wunreachable-code";
+add_c_flag "-Wunreachable-code-loop-increment";
+add_c_flag "-Wformat-signedness";
+add_c_flag "-Wformat-security";
+add_c_flag "-Wformat";
+add_c_flag "-Wstack-usage=8192";
+add_c_flag "-Wmissing-prototypes";
+add_c_flag "-Wstrict-prototypes";
+add_c_flag "-Wmissing-variable-declarations";
+add_c_flag "-Wstrict-aliasing=3";
+add_c_flag "-Wshorten-64-to-32";
+add_c_flag "-Wunsafe-loop-optimizations";
+add_c_flag "-Wno-format-truncation";
 
 printf "\n%s:\n" "-f flags";
-add_c_and_cxx_flag "-fno-stack-protector";
-add_c_and_cxx_flag "-fdata-sections";
-add_c_and_cxx_flag "-ffunction-sections";
-add_c_and_cxx_flag "-fno-strict-aliasing";
-add_c_and_cxx_flag "-fvisibility=hidden";
+add_c_flag "-fno-stack-protector";
+add_c_flag "-fdata-sections";
+add_c_flag "-ffunction-sections";
+add_c_flag "-fno-strict-aliasing";
+add_c_flag "-fvisibility=hidden";
 
 printf "\n%s:\n" "Misc flags";
 LDFLAGS="-rdynamic ${LDFLAGS}";
-add_c_and_cxx_flag "-ggdb3" && LDFLAGS="-ggdb3 ${LDFLAGS}";
+add_c_flag "-ggdb3" && LDFLAGS="-ggdb3 ${LDFLAGS}";
 
 # Bring it back!
 set -e;
@@ -335,10 +335,10 @@ fi;
 
 if test "${use_sanitize}" = "yes"; then
 	add_config "CONFIG_SANITIZE";
-	if ! add_c_and_cxx_flag "-fsanitize=address"; then
+	if ! add_c_flag "-fsanitize=address"; then
 		fatal "ERROR: -fsanitize=address is not supported by your compiler";
 	fi;
-	if ! add_c_and_cxx_flag "-fsanitize=undefined"; then
+	if ! add_c_flag "-fsanitize=undefined"; then
 		fatal "ERROR: -fsanitize=undefined is not supported by your compiler";
 	fi;
 	LDFLAGS="${LDFLAGS} -fsanitize=address -fsanitize=undefined";
