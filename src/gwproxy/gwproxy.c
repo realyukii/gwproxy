@@ -47,6 +47,7 @@ static const struct option long_opts[] = {
 	{ "raw-dns",		required_argument,	NULL,	'r' },
 #ifdef CONFIG_RAW_DNS
 	{ "dns-server",		required_argument,	NULL,	'j' },
+	{ "session-map-cap",	required_argument,	NULL,	's' },
 #endif
 	{ "event-loop",		required_argument,	NULL,	'e' },
 	{ "bind",		required_argument,	NULL,	'b' },
@@ -98,7 +99,8 @@ static const struct gwp_cfg default_opts = {
 	.log_file		= "/dev/stdout",
 	.pid_file		= NULL,
 #ifdef CONFIG_RAW_DNS
-	.ns_addr_str		= "1.1.1.1"
+	.ns_addr_str		= "1.1.1.1",
+	.sess_map_cap		= 16
 #endif
 };
 
@@ -241,6 +243,9 @@ static int parse_options(int argc, char *argv[], struct gwp_cfg *cfg)
 		case 'j':
 			cfg->ns_addr_str = optarg;
 			break;
+		case 's':
+			cfg->sess_map_cap = atoi(optarg);
+			break;
 #endif
 		default:
 			fprintf(stderr, "Unknown option: %c\n", c);
@@ -369,17 +374,6 @@ static int gwp_ctx_init_thread_sock(struct gwp_wrk *w,
 	socklen_t slen;
 	int fd, r, v;
 
-	if (w->ctx->cfg.use_raw_dns) {
-#ifdef CONFIG_RAW_DNS
-		fd = __sys_socket(w->ctx->dns->ns_addr.sa.sa_family, SOCK_DGRAM | SOCK_NONBLOCK, 0);
-		if (fd < 0) {
-			pr_err(&w->ctx->lh, "Failed to create udp_fd: %s\n", strerror(-fd));
-			return fd;
-		}
-		w->udp_fd = fd;
-#endif
-	}
-
 	r = ba->sa.sa_family;
 	if (r == AF_INET) {
 		slen = sizeof(struct sockaddr_in);
@@ -426,9 +420,6 @@ out_close:
 __cold
 static void gwp_ctx_free_thread_sock(struct gwp_wrk *w)
 {
-	if (w->ctx->cfg.use_raw_dns)
-		__sys_close(w->udp_fd);
-
 	if (w->tcp_fd >= 0) {
 		__sys_close(w->tcp_fd);
 		pr_dbg(&w->ctx->lh, "Worker %u socket closed (fd=%d)", w->idx,
@@ -474,6 +465,101 @@ static void gwp_ctx_free_thread_event(struct gwp_wrk *w)
 	}
 }
 
+#ifdef CONFIG_RAW_DNS
+
+static inline int realloc_stack(struct dns_resolver *resolv)
+{
+	struct gwp_conn_pair **cp;
+	uint16_t *stack;
+	size_t newcap;
+	uint16_t j, idx;
+
+	newcap = resolv->sess_map_cap * 2;
+	if (newcap > 65536)
+		return -ENOSPC;
+	
+	cp = realloc(resolv->sess_map, sizeof(*cp) * newcap);
+	if (!cp)
+		return -ENOMEM;
+
+	stack = realloc(resolv->stack.arr, sizeof(*stack) * newcap);
+	if (!stack) {
+		free(cp);
+		return -ENOMEM;
+	}
+
+	j = (uint16_t)newcap - 1;
+	for (idx = 0; j > resolv->sess_map_cap; idx++,j--)
+		stack[idx] = j;
+
+	resolv->sess_map = cp;
+	resolv->stack.arr = stack;
+	resolv->sess_map_cap = newcap;
+
+	return 0;
+}
+
+static inline int pop_txid(struct dns_resolver *resolv)
+{
+	int r;
+	if (resolv->stack.top == 0) {
+		r = realloc_stack(resolv);
+		if (r)
+			return -EAGAIN;
+	}
+
+	return resolv->stack.arr[--resolv->stack.top];
+}
+
+static int gwp_ctx_init_dns_resolver(struct gwp_wrk *w)
+{
+	struct dns_resolver *resolv;
+	struct gwp_dns_ctx *dns;
+	struct gwp_cfg *cfg;
+	struct gwp_ctx *ctx;
+	int udp_fd, r;
+	void *ptr;
+
+	ctx = w->ctx;
+	cfg = &ctx->cfg;
+	dns = ctx->dns;
+	udp_fd = __sys_socket(dns->ns_addr.sa.sa_family, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+	if (udp_fd < 0) {
+		pr_err(&w->ctx->lh, "Failed to create udp_fd: %s\n", strerror(-udp_fd));
+		return udp_fd;
+	}
+
+	resolv = &w->dns_resolver;
+	ptr = calloc(cfg->sess_map_cap, sizeof(*resolv->stack.arr));
+	if (!ptr) {
+		r = -ENOMEM;
+		goto exit_close;
+	}
+	resolv->stack.arr = ptr;
+	ptr = calloc(cfg->sess_map_cap, sizeof(ptr));
+	if (!ptr) {
+		r = -ENOMEM;
+		goto exit_free;
+	}
+	resolv->sess_map = ptr;
+
+	resolv->udp_fd = udp_fd;
+	resolv->sess_map_cap = cfg->sess_map_cap;
+
+	r = cfg->sess_map_cap;
+	resolv->stack.top = r--;
+	for (; r <= 0; r--)
+		resolv->stack.arr[r] = r;
+
+	return 0;
+exit_free:
+	free(resolv->stack.arr);
+exit_close:
+	__sys_close(udp_fd);
+	return r;
+}
+#endif
+
 __cold
 static int gwp_ctx_init_thread(struct gwp_wrk *w,
 			       const struct gwp_sockaddr *bind_addr)
@@ -487,8 +573,11 @@ static int gwp_ctx_init_thread(struct gwp_wrk *w,
 		return r;
 	}
 
-	w->current_txid = 0;
-	memset(w->session_map, 0, sizeof(w->session_map));
+	if (ctx->cfg.use_raw_dns) {
+#ifdef CONFIG_RAW_DNS
+		r = gwp_ctx_init_dns_resolver(w);
+#endif
+	}
 
 	r = gwp_ctx_init_thread_event(w);
 	if (r < 0) {
@@ -557,9 +646,19 @@ static void gwp_ctx_signal_all_workers(struct gwp_ctx *ctx)
 	}
 }
 
+static void gwp_ctx_free_raw_dns(struct gwp_wrk *w)
+{
+	struct dns_resolver *resolv = &w->dns_resolver;
+	__sys_close(resolv->udp_fd);
+	free(resolv->sess_map);
+	free(resolv->stack.arr);
+}
+
 __cold
 static void gwp_ctx_free_thread(struct gwp_wrk *w)
 {
+	if (w->ctx->cfg.use_raw_dns)
+		gwp_ctx_free_raw_dns(w);
 	gwp_ctx_free_thread_sock_pairs(w);
 	gwp_ctx_free_thread_sock(w);
 	gwp_ctx_free_thread_event(w);
@@ -1040,7 +1139,7 @@ int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 		if (w->ctx->cfg.use_raw_dns) {
 #ifdef CONFIG_RAW_DNS
 			pr_dbg(&w->ctx->lh, "client disconnected before query for %s resolved", gcp->gde->name);
-			w->session_map[gcp->gde->txid] = NULL;
+			return_txid(w, gcp->gde->txid);
 			gwp_dns_raw_entry_free(w->ctx->dns, gcp->gde);
 #endif
 		} else {
@@ -1249,11 +1348,17 @@ static int queue_dns_resolution(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 
 	if (w->ctx->cfg.use_raw_dns) {
 #ifdef CONFIG_RAW_DNS
-		gde = gwp_raw_dns_queue(w->current_txid, dns, host, port);
-		if (!gde)
+		int txid = pop_txid(&w->dns_resolver);
+		if (txid < 0)
+			return -EAGAIN;
+
+		gde = gwp_raw_dns_queue((uint16_t)txid, dns, host, port);
+		if (!gde) {
+			return_txid(w, txid);
 			return -ENOMEM;
+		}
 		pr_dbg(&w->ctx->lh, "constructing standard DNS query packet for %s", host);
-		w->session_map[w->current_txid++] = gcp;
+		w->dns_resolver.sess_map[txid] = gcp;
 #endif
 	} else {
 		gde = gwp_dns_queue(dns, host, port);

@@ -46,6 +46,7 @@ struct gwp_cfg {
 	const char	*pid_file;
 #ifdef CONFIG_RAW_DNS
 	const char	*ns_addr_str;
+	int		sess_map_cap;
 #endif
 };
 
@@ -198,12 +199,22 @@ struct iou {
 };
 #endif
 
+struct stack_u16 {
+	uint16_t top;
+	uint16_t *arr;
+};
+
+struct dns_resolver {
+	struct stack_u16	stack;
+	struct gwp_conn_pair	**sess_map;
+	uint16_t		sess_map_cap;
+	int			udp_fd;
+};
+
 struct gwp_wrk {
 	int			tcp_fd;
-	int			udp_fd;
-	uint16_t		current_txid;
-	/* Mapping DNS queries to the corresponding proxy session */
-	struct gwp_conn_pair	*session_map[65536];
+	/* For mapping DNS queries to the corresponding proxy session */
+	struct dns_resolver	dns_resolver;
 	struct gwp_conn_slot	conn_slot;
 
 	union {
@@ -257,6 +268,71 @@ int gwp_create_sock_target(struct gwp_wrk *w, struct gwp_sockaddr *addr,
 int gwp_create_timer(int fd, int sec, int nsec);
 void gwp_setup_cli_sock_options(struct gwp_wrk *w, int fd);
 const char *ip_to_str(const struct gwp_sockaddr *gs);
+
+static inline void shrink_stack(struct gwp_wrk *w)
+{
+	(void)w;
+#ifdef CONFIG_RAW_DNS
+	struct dns_resolver *resolv;
+	struct gwp_cfg *cfg;
+	uint16_t *p1;
+	void *p2;
+	int i;
+
+	cfg = &w->ctx->cfg;
+	resolv = &w->dns_resolver;
+	p1 = realloc(resolv->stack.arr, cfg->sess_map_cap * sizeof(*resolv->stack.arr));
+	if (!p1)
+		return;
+	p2 = realloc(resolv->sess_map, cfg->sess_map_cap * sizeof(*resolv->sess_map));
+	if (!p2)
+		return;
+
+	memset(p2, 0, cfg->sess_map_cap * sizeof(*resolv->sess_map));
+
+	i = cfg->sess_map_cap;
+	resolv->stack.top = i--;
+	for (; i <= 0; i--)
+		p1[i] = i;
+
+	resolv->stack.arr = p1;
+	resolv->sess_map = p2;
+	resolv->sess_map_cap = cfg->sess_map_cap;
+#endif
+}
+
+static inline int return_txid(struct gwp_wrk *w, uint16_t txid)
+{
+	(void)w;
+	(void)txid;
+#ifdef CONFIG_RAW_DNS
+	struct dns_resolver *resolv;
+	struct gwp_cfg *cfg;
+	uint16_t idx;
+
+	resolv = &w->dns_resolver;
+	cfg = &w->ctx->cfg;
+	/* the program shouldn't return more than its pop */
+	if (resolv->stack.top >= resolv->sess_map_cap) {
+		assert(0);
+		return -EINVAL;
+	}
+
+	idx = resolv->stack.top++;
+	/* shrinks it when there is no active query
+	 * and the allocated size is larger than the default size.
+	 */
+	if (idx == resolv->sess_map_cap &&
+		resolv->sess_map_cap > cfg->sess_map_cap) {
+		shrink_stack(w);
+	} else {
+		resolv->stack.arr[idx] = txid;
+		resolv->sess_map[idx] = NULL;
+	}
+
+#endif
+	return 0;
+}
 
 static inline void gwp_conn_buf_advance(struct gwp_conn *conn, size_t len)
 {

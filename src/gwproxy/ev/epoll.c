@@ -43,7 +43,7 @@ int gwp_ctx_init_thread_epoll(struct gwp_wrk *w)
 #ifdef CONFIG_RAW_DNS
 		ev.events = EPOLLIN;
 		ev.data.u64 = EV_BIT_DNS_QUERY;
-		r = __sys_epoll_ctl(ep_fd, EPOLL_CTL_ADD, w->udp_fd, &ev);
+		r = __sys_epoll_ctl(ep_fd, EPOLL_CTL_ADD, w->dns_resolver.udp_fd, &ev);
 		if (unlikely(r))
 			return (int)r;
 #endif
@@ -798,7 +798,7 @@ static int send_raw_dns_query(struct gwp_wrk *w,
 
 	dctx = w->ctx->dns;
 	r = __sys_sendto(
-		w->udp_fd, gde->payload, gde->payloadlen, MSG_NOSIGNAL,
+		w->dns_resolver.udp_fd, gde->payload, gde->payloadlen, MSG_NOSIGNAL,
 		&dctx->ns_addr.sa, dctx->ns_addrlen
 	);
 	if (r < 0)
@@ -872,7 +872,7 @@ static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 
 		dctx = w->ctx->dns;
 		r = (int)__sys_recvfrom(
-			w->udp_fd, buff, sizeof(buff), 0,
+			w->dns_resolver.udp_fd, buff, sizeof(buff), 0,
 			&dctx->ns_addr.sa, &dctx->ns_addrlen
 		);
 		if (r < 0)
@@ -881,7 +881,7 @@ static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 			return -EINVAL;
 
 		memcpy(&txid, buff, 2);
-		gcp = w->session_map[txid];
+		gcp = w->dns_resolver.sess_map[txid];
 		if (!gcp)
 			return -ENOENT;
 
@@ -893,6 +893,9 @@ static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 			return send_raw_dns_query(w, gcp);
 		} else if (r)
 			gde->res = r;
+
+		r = return_txid(w, txid);
+		assert(!r);
 #endif
 	} else {
 		gde = gcp->gde;
@@ -921,7 +924,6 @@ static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	if (w->ctx->cfg.use_raw_dns) {
 #ifdef CONFIG_RAW_DNS
 		pr_dbg(&w->ctx->lh, "removing proxy session from the %s's txid map", gde->name);
-		w->session_map[gde->txid] = NULL;
 		gwp_dns_raw_entry_free(w->ctx->dns, gde);
 #endif
 	} else {

@@ -254,13 +254,13 @@ int gwp_dns_process(uint8_t buff[UDP_MSG_LIMIT], int bufflen, struct gwp_dns_ctx
 	if (r) {
 		if (r == -ENODATA)
 			r = attempt_fallback(ctx, e);
-		goto exit_free_ai;
+		goto exit;
 	}
 
 	e->addr = ai->ai_addr;
 
-exit_free_ai:
 	gwdns_free_parsed_query(ai);
+exit:
 	return (int)r;
 }
 
@@ -282,6 +282,7 @@ struct gwp_dns_entry *gwp_raw_dns_queue(uint16_t txid, struct gwp_dns_ctx *ctx,
 	switch (ctx->cfg.restyp) {
 	case GWP_DNS_RESTYP_PREFER_IPV4:
 	case GWP_DNS_RESTYP_IPV4_ONLY:
+	case GWP_DNS_RESTYP_DEFAULT:
 		af = AF_INET;
 		break;
 	case GWP_DNS_RESTYP_PREFER_IPV6:
