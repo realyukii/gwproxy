@@ -9,6 +9,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include <gwproxy/common.h>
 #include <gwproxy/syscall.h>
 #include <gwproxy/socks5.h>
 #include <gwproxy/dns.h>
@@ -213,8 +214,10 @@ struct dns_resolver {
 
 struct gwp_wrk {
 	int			tcp_fd;
+#ifdef CONFIG_RAW_DNS
 	/* For mapping DNS queries to the corresponding proxy session */
 	struct dns_resolver	dns_resolver;
+#endif
 	struct gwp_conn_slot	conn_slot;
 
 	union {
@@ -269,10 +272,9 @@ int gwp_create_timer(int fd, int sec, int nsec);
 void gwp_setup_cli_sock_options(struct gwp_wrk *w, int fd);
 const char *ip_to_str(const struct gwp_sockaddr *gs);
 
+#ifdef CONFIG_RAW_DNS
 static inline void shrink_stack(struct gwp_wrk *w)
 {
-	(void)w;
-#ifdef CONFIG_RAW_DNS
 	struct dns_resolver *resolv;
 	struct gwp_cfg *cfg;
 	uint16_t *p1;
@@ -298,14 +300,10 @@ static inline void shrink_stack(struct gwp_wrk *w)
 	resolv->stack.arr = p1;
 	resolv->sess_map = p2;
 	resolv->sess_map_cap = cfg->sess_map_cap;
-#endif
 }
 
-static inline int return_txid(struct gwp_wrk *w, uint16_t txid)
+static inline int return_txid(struct gwp_wrk *w, struct gwp_dns_entry *gde)
 {
-	(void)w;
-	(void)txid;
-#ifdef CONFIG_RAW_DNS
 	struct dns_resolver *resolv;
 	struct gwp_cfg *cfg;
 	uint16_t idx;
@@ -326,13 +324,18 @@ static inline int return_txid(struct gwp_wrk *w, uint16_t txid)
 		resolv->sess_map_cap > cfg->sess_map_cap) {
 		shrink_stack(w);
 	} else {
-		resolv->stack.arr[idx] = txid;
+		resolv->stack.arr[idx] = gde->txid;
 		resolv->sess_map[idx] = NULL;
 	}
 
-#endif
 	return 0;
 }
+#else
+static inline int return_txid(__maybe_unused struct gwp_wrk *w, __maybe_unused struct gwp_dns_entry *gde)
+{
+	return 0;
+}
+#endif
 
 static inline void gwp_conn_buf_advance(struct gwp_conn *conn, size_t len)
 {

@@ -466,7 +466,6 @@ static void gwp_ctx_free_thread_event(struct gwp_wrk *w)
 }
 
 #ifdef CONFIG_RAW_DNS
-
 static inline int realloc_stack(struct dns_resolver *resolv)
 {
 	struct gwp_conn_pair **cp;
@@ -509,6 +508,27 @@ static inline int pop_txid(struct dns_resolver *resolv)
 	}
 
 	return resolv->stack.arr[--resolv->stack.top];
+}
+
+static struct gwp_dns_entry *generate_gde(struct gwp_wrk *w, struct gwp_conn_pair *gcp, const char *host, const char *port)
+{
+	struct gwp_dns_entry *gde;
+	struct gwp_dns_ctx *dns = w->ctx->dns;
+	int txid;
+	
+	txid = pop_txid(&w->dns_resolver);
+	if (txid < 0)
+		return  NULL;
+
+	gde = gwp_raw_dns_queue((uint16_t)txid, dns, host, port);
+	if (!gde) {
+		return_txid(w, gde);
+		return  NULL;
+	}
+	pr_dbg(&w->ctx->lh, "constructing standard DNS query packet for %s", host);
+	w->dns_resolver.sess_map[txid] = gcp;
+
+	return gde;
 }
 
 static int gwp_ctx_init_dns_resolver(struct gwp_wrk *w)
@@ -558,7 +578,31 @@ exit_close:
 	__sys_close(udp_fd);
 	return r;
 }
-#endif
+
+static void gwp_ctx_free_raw_dns(struct gwp_wrk *w)
+{
+	struct dns_resolver *resolv = &w->dns_resolver;
+	__sys_close(resolv->udp_fd);
+	free(resolv->sess_map);
+	free(resolv->stack.arr);
+}
+#else
+static struct gwp_dns_entry *generate_gde(__maybe_unused struct gwp_wrk *w,
+					  __maybe_unused struct gwp_conn_pair *gcp,
+					  __maybe_unused const char *host,
+					  __maybe_unused const char *port)
+{
+	return NULL;
+}
+static int gwp_ctx_init_dns_resolver(__maybe_unused struct gwp_wrk *w)
+{
+	return 0;
+}
+
+static void gwp_ctx_free_raw_dns(__maybe_unused struct gwp_wrk *w)
+{
+}
+#endif /* #ifdef CONFIG_RAW_DNS */
 
 __cold
 static int gwp_ctx_init_thread(struct gwp_wrk *w,
@@ -574,9 +618,11 @@ static int gwp_ctx_init_thread(struct gwp_wrk *w,
 	}
 
 	if (ctx->cfg.use_raw_dns) {
-#ifdef CONFIG_RAW_DNS
 		r = gwp_ctx_init_dns_resolver(w);
-#endif
+		if (r) {
+			pr_err(&ctx->lh, "gwp_ctx_init_thread_event: %s\n", strerror(-r));
+			gwp_ctx_free_thread_sock(w);
+		}
 	}
 
 	r = gwp_ctx_init_thread_event(w);
@@ -644,14 +690,6 @@ static void gwp_ctx_signal_all_workers(struct gwp_ctx *ctx)
 		gwp_ctx_signal_all_io_uring(ctx);
 #endif
 	}
-}
-
-static void gwp_ctx_free_raw_dns(struct gwp_wrk *w)
-{
-	struct dns_resolver *resolv = &w->dns_resolver;
-	__sys_close(resolv->udp_fd);
-	free(resolv->sess_map);
-	free(resolv->stack.arr);
 }
 
 __cold
@@ -1137,11 +1175,9 @@ int gwp_free_conn_pair(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 
 	if (gcp->gde) {
 		if (w->ctx->cfg.use_raw_dns) {
-#ifdef CONFIG_RAW_DNS
 			pr_dbg(&w->ctx->lh, "client disconnected before query for %s resolved", gcp->gde->name);
-			return_txid(w, gcp->gde->txid);
+			return_txid(w, gcp->gde);
 			gwp_dns_raw_entry_free(w->ctx->dns, gcp->gde);
-#endif
 		} else {
 			gwp_dns_entry_put(gcp->gde);
 		}
@@ -1344,22 +1380,10 @@ static int queue_dns_resolution(struct gwp_wrk *w, struct gwp_conn_pair *gcp,
 				const char *host, const char *port)
 {
 	struct gwp_dns_ctx *dns = w->ctx->dns;
-	struct gwp_dns_entry *gde = NULL;
+	struct gwp_dns_entry *gde;
 
 	if (w->ctx->cfg.use_raw_dns) {
-#ifdef CONFIG_RAW_DNS
-		int txid = pop_txid(&w->dns_resolver);
-		if (txid < 0)
-			return -EAGAIN;
-
-		gde = gwp_raw_dns_queue((uint16_t)txid, dns, host, port);
-		if (!gde) {
-			return_txid(w, txid);
-			return -ENOMEM;
-		}
-		pr_dbg(&w->ctx->lh, "constructing standard DNS query packet for %s", host);
-		w->dns_resolver.sess_map[txid] = gcp;
-#endif
+		gde = generate_gde(w, gcp, host, port);
 	} else {
 		gde = gwp_dns_queue(dns, host, port);
 	}

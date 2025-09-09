@@ -789,8 +789,7 @@ static int handle_connect(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 }
 
 #ifdef CONFIG_RAW_DNS
-static int send_raw_dns_query(struct gwp_wrk *w,
-					struct gwp_conn_pair *gcp)
+static int send_raw_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 {
 	struct gwp_dns_entry *gde = gcp->gde;
 	struct gwp_dns_ctx *dctx;
@@ -805,6 +804,59 @@ static int send_raw_dns_query(struct gwp_wrk *w,
 		return (int)r;
 	pr_dbg(&w->ctx->lh, "standard DNS query for %s has been sent", gde->name);
 
+	return 0;
+}
+static int read_raw_dns(struct gwp_wrk *w, struct gwp_conn_pair **pgcp, struct gwp_dns_entry **pgde)
+{
+	uint8_t buff[UDP_MSG_LIMIT];
+	struct gwp_conn_pair *gcp;
+	struct gwp_dns_entry *gde;
+	struct gwp_dns_ctx *dctx;
+	uint16_t txid;
+	int r;
+
+	dctx = w->ctx->dns;
+	r = (int)__sys_recvfrom(
+		w->dns_resolver.udp_fd, buff, sizeof(buff), 0,
+		&dctx->ns_addr.sa, &dctx->ns_addrlen
+	);
+	if (r < 0)
+		return (int)r;
+	if (r < 38)
+		return -EINVAL;
+
+	memcpy(&txid, buff, 2);
+	gcp = w->dns_resolver.sess_map[txid];
+	if (!gcp)
+		return -ENOENT;
+
+	gde = gcp->gde;
+	pr_dbg(&w->ctx->lh, "proxy session for DNS query %s was found!", gde->name);
+	r = gwp_dns_process(buff, r, dctx, gde);
+	if (r == -EAGAIN) {
+		pr_dbg(&w->ctx->lh, "DNS Fallback");
+		return send_raw_dns_query(w, gcp);
+	} else if (r)
+		gde->res = r;
+
+	r = return_txid(w, gde);
+	assert(!r);
+	if (r)
+		return r;
+
+	*pgcp = gcp;
+	*pgde = gde;
+	return 0;
+}
+#else
+static int send_raw_dns_query(__maybe_unused struct gwp_wrk *w, __maybe_unused struct gwp_conn_pair *gcp)
+{
+	return 0;
+}
+static int read_raw_dns(__maybe_unused struct gwp_wrk *w,
+			__maybe_unused struct gwp_conn_pair **pgcp,
+			__maybe_unused struct gwp_dns_entry **pgde)
+{
 	return 0;
 }
 #endif
@@ -824,11 +876,9 @@ static int arm_poll_for_dns_query(struct gwp_wrk *w,
 	ev.data.u64 |= EV_BIT_DNS_QUERY;
 
 	if (w->ctx->cfg.use_raw_dns) {
-#ifdef CONFIG_RAW_DNS
 		r = send_raw_dns_query(w, gcp);
 		if (r)
 			return r;
-#endif
 	} else {
 		assert(gde->ev_fd >= 0);
 		r = __sys_epoll_ctl(w->ep_fd, EPOLL_CTL_ADD, gde->ev_fd, &ev);
@@ -865,38 +915,9 @@ static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	int r, ct;
 
 	if (w->ctx->cfg.use_raw_dns) {
-#ifdef CONFIG_RAW_DNS
-		uint8_t buff[UDP_MSG_LIMIT];
-		struct gwp_dns_ctx *dctx;
-		uint16_t txid;
-
-		dctx = w->ctx->dns;
-		r = (int)__sys_recvfrom(
-			w->dns_resolver.udp_fd, buff, sizeof(buff), 0,
-			&dctx->ns_addr.sa, &dctx->ns_addrlen
-		);
-		if (r < 0)
-			return (int)r;
-		if (r < 38)
-			return -EINVAL;
-
-		memcpy(&txid, buff, 2);
-		gcp = w->dns_resolver.sess_map[txid];
-		if (!gcp)
-			return -ENOENT;
-
-		gde = gcp->gde;
-		pr_dbg(&w->ctx->lh, "proxy session for DNS query %s was found!", gde->name);
-		r = gwp_dns_process(buff, r, dctx, gde);
-		if (r == -EAGAIN) {
-			pr_dbg(&w->ctx->lh, "DNS Fallback");
-			return send_raw_dns_query(w, gcp);
-		} else if (r)
-			gde->res = r;
-
-		r = return_txid(w, txid);
-		assert(!r);
-#endif
+		r = read_raw_dns(w, &gcp, &gde);
+		if (r)
+			return r;
 	} else {
 		gde = gcp->gde;
 		assert(gde);
@@ -922,10 +943,8 @@ static int handle_ev_dns_query(struct gwp_wrk *w, struct gwp_conn_pair *gcp)
 	}
 
 	if (w->ctx->cfg.use_raw_dns) {
-#ifdef CONFIG_RAW_DNS
 		pr_dbg(&w->ctx->lh, "removing proxy session from the %s's txid map", gde->name);
 		gwp_dns_raw_entry_free(w->ctx->dns, gde);
-#endif
 	} else {
 		gwp_dns_entry_put(gde);
 	}

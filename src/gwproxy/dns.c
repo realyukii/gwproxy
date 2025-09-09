@@ -329,7 +329,10 @@ out_free_e:
 	free(e);
 	return NULL;
 }
-
+#else
+static void free_all_queued_entries(__maybe_unused struct gwp_dns_ctx *ctx)
+{
+}
 #endif /* #ifdef CONFIG_RAW_DNS */
 
 static void gwp_dns_entry_free(struct gwp_dns_entry *e)
@@ -931,9 +934,7 @@ static void put_all_queued_entries(struct gwp_dns_ctx *ctx)
 void gwp_dns_ctx_free(struct gwp_dns_ctx *ctx)
 {
 	if (ctx->cfg.use_raw_dns) {
-#ifdef CONFIG_RAW_DNS
 		free_all_queued_entries(ctx);
-#endif
 	} else {
 		free_workers(ctx);
 		pthread_cond_destroy(&ctx->cond);

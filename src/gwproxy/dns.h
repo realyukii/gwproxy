@@ -9,6 +9,7 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <netinet/in.h>
+#include <gwproxy/common.h>
 #include <gwproxy/net.h>
 #include <gwproxy/dnsparser.h>
 #include <gwproxy/syscall.h>
@@ -126,6 +127,16 @@ struct gwp_dns_entry *gwp_raw_dns_queue(uint16_t txid, struct gwp_dns_ctx *ctx,
 void gwp_dns_raw_entry_free(struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e);
 
 int gwp_dns_process(uint8_t buff[UDP_MSG_LIMIT], int bufflen, struct gwp_dns_ctx *ctx, struct gwp_dns_entry *e);
+#else
+static inline struct gwp_dns_entry *gwp_raw_dns_queue(__maybe_unused uint16_t txid, __maybe_unused struct gwp_dns_ctx *ctx,
+				    __maybe_unused const char *name, __maybe_unused const char *service)
+{
+	return NULL;
+}
+
+static inline void gwp_dns_raw_entry_free(__maybe_unused struct gwp_dns_ctx *ctx, __maybe_unused struct gwp_dns_entry *e)
+{
+}
 #endif
 
 /**
