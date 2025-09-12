@@ -469,11 +469,12 @@ static void gwp_ctx_free_thread_event(struct gwp_wrk *w)
 static inline int realloc_stack(struct dns_resolver *resolv)
 {
 	struct gwp_conn_pair **cp;
+	size_t newcap, oldcap;
 	uint16_t *stack;
-	size_t newcap;
 	uint16_t j, idx;
 
-	newcap = resolv->sess_map_cap * 2;
+	oldcap = resolv->sess_map_cap;
+	newcap = oldcap * 2;
 	if (newcap > 65536)
 		return -ENOSPC;
 
@@ -482,16 +483,18 @@ static inline int realloc_stack(struct dns_resolver *resolv)
 		return -ENOMEM;
 
 	resolv->sess_map = cp;
+	resolv->sess_map_cap = newcap;
+	memset(&resolv->sess_map[oldcap], 0, oldcap);
+
 	stack = realloc(resolv->stack.arr, sizeof(*stack) * newcap);
 	if (!stack)
 		return -ENOMEM;
 	resolv->stack.arr = stack;
+	resolv->stack.top = newcap;
 
 	j = (uint16_t)newcap - 1;
-	for (idx = 0; j > resolv->sess_map_cap; idx++,j--)
+	for (idx = 0; j > resolv->stack.top; idx++,j--)
 		stack[idx] = j;
-
-	resolv->sess_map_cap = newcap;
 
 	return 0;
 }
@@ -548,33 +551,23 @@ static int gwp_ctx_init_dns_resolver(struct gwp_wrk *w)
 	}
 
 	resolv = &w->dns_resolver;
-	ptr = calloc(cfg->sess_map_cap, sizeof(*resolv->stack.arr));
-	if (!ptr) {
-		r = -ENOMEM;
-		goto exit_close;
-	}
-	resolv->stack.arr = ptr;
-	ptr = calloc(cfg->sess_map_cap, sizeof(ptr));
-	if (!ptr) {
-		r = -ENOMEM;
-		goto exit_free;
-	}
-	resolv->sess_map = ptr;
+	resolv->sess_map = NULL;
+	resolv->stack.arr = NULL;
+	r = reset_stack(w);
+	if (r) {
+		if (resolv->stack.arr)
+			free(resolv->stack.arr);
+		if (resolv->sess_map)
+			free(resolv->sess_map);
+		__sys_close(udp_fd);
 
+		return r;
+	}
+
+	memset(resolv->sess_map, 0, cfg->sess_map_cap * sizeof(ptr));
 	resolv->udp_fd = udp_fd;
-	resolv->sess_map_cap = cfg->sess_map_cap;
-
-	r = cfg->sess_map_cap;
-	resolv->stack.top = r--;
-	for (; r <= 0; r--)
-		resolv->stack.arr[r] = r;
 
 	return 0;
-exit_free:
-	free(resolv->stack.arr);
-exit_close:
-	__sys_close(udp_fd);
-	return r;
 }
 
 static void gwp_ctx_free_raw_dns(struct gwp_wrk *w)

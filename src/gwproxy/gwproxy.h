@@ -273,34 +273,36 @@ void gwp_setup_cli_sock_options(struct gwp_wrk *w, int fd);
 const char *ip_to_str(const struct gwp_sockaddr *gs);
 
 #ifdef CONFIG_RAW_DNS
-static inline void shrink_stack(struct gwp_wrk *w)
+static inline int reset_stack(struct gwp_wrk *w)
 {
 	struct dns_resolver *resolv;
 	struct gwp_cfg *cfg;
 	uint16_t *p1;
+	int i, d;
 	void *p2;
-	int i;
 
 	cfg = &w->ctx->cfg;
+	d = cfg->sess_map_cap;
 	resolv = &w->dns_resolver;
-	p1 = realloc(resolv->stack.arr, cfg->sess_map_cap * sizeof(*resolv->stack.arr));
+	p1 = realloc(resolv->stack.arr, d * sizeof(*resolv->stack.arr));
 	if (!p1)
-		return;
+		return -ENOMEM;
 	resolv->stack.arr = p1;
+	resolv->stack.top = d;
 
-	p2 = realloc(resolv->sess_map, cfg->sess_map_cap * sizeof(*resolv->sess_map));
-	if (!p2)
-		return;
-	resolv->sess_map = p2;
-
-	memset(p2, 0, cfg->sess_map_cap * sizeof(*resolv->sess_map));
-
-	i = cfg->sess_map_cap;
+	i = d;
 	resolv->stack.top = i--;
 	for (; i <= 0; i--)
 		p1[i] = i;
 
-	resolv->sess_map_cap = cfg->sess_map_cap;
+	p2 = realloc(resolv->sess_map, d * sizeof(*resolv->sess_map));
+	if (!p2)
+		return -ENOMEM;
+	resolv->sess_map = p2;
+	memset(p2, 0, d * sizeof(*resolv->sess_map));
+	resolv->sess_map_cap = d;
+
+	return 0;
 }
 
 static inline int return_txid(struct gwp_wrk *w, struct gwp_dns_entry *gde)
@@ -318,16 +320,14 @@ static inline int return_txid(struct gwp_wrk *w, struct gwp_dns_entry *gde)
 	}
 
 	idx = resolv->stack.top++;
+	resolv->stack.arr[idx] = gde->txid;
+	resolv->sess_map[idx] = NULL;
 	/* shrinks it when there is no active query
 	 * and the allocated size is larger than the default size.
 	 */
 	if (idx == resolv->sess_map_cap &&
-		resolv->sess_map_cap > cfg->sess_map_cap) {
-		shrink_stack(w);
-	} else {
-		resolv->stack.arr[idx] = gde->txid;
-		resolv->sess_map[idx] = NULL;
-	}
+		resolv->sess_map_cap > cfg->sess_map_cap)
+		reset_stack(w);
 
 	return 0;
 }
