@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <netinet/in.h>
 #include <gwproxy/net.h>
+#include <gwproxy/syscall.h>
 
 struct gwp_dns_wrk;
 

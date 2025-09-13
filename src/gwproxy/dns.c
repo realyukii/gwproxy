@@ -188,7 +188,7 @@ static void gwp_dns_entry_free(struct gwp_dns_entry *e)
 		return;
 
 	assert(e->ev_fd >= 0);
-	close(e->ev_fd);
+	__sys_close(e->ev_fd);
 	free(e->name);
 	free(e);
 }
@@ -826,7 +826,7 @@ struct gwp_dns_entry *gwp_dns_queue(struct gwp_dns_ctx *ctx,
 	return e;
 
 out_close_ev_fd:
-	close(e->ev_fd);
+	__sys_close(e->ev_fd);
 out_free_e:
 	free(e);
 	return NULL;
